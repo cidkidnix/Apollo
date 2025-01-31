@@ -12,18 +12,19 @@ type (
   ApolloConfig struct {
     LedgerOffset string `toml:"offset"`
     User User `toml:"user"`
+    Sandbox bool `toml:"sandbox"`
     LedgerConnection LedgerConnection `toml:"ledger"`
     DatabaseSettings Database.DatabaseConnection `toml:"database"`
   }
 
   LedgerConnection struct {
-    Host string
-    Port uint64
+    Host string `toml:"host"`
+    Port uint64 `toml:"port"`
   }
 
   User struct {
-    Name string
-    AuthToken string
+    AuthToken string `toml:"auth_token"`
+    ApplicationId string `toml:"application_id"`
   }
 )
 

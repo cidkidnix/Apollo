@@ -96,7 +96,7 @@ func CreateLedgerContext(connectionStr string, authToken string, applicationId s
     GetConnection: func() (ConnectionWrapper) {
       ctx := context.Background()
       ctx, cancelCtx := context.WithTimeout(ctx, time.Second * 30)
-      conn, err := grpc.DialContext(ctx, connectionStr, grpc.WithInsecure(), grpc.WithBlock(), grpc.WithUnaryInterceptor(GenTokenUnaryInterceptor(authToken)), grpc.WithStreamInterceptor(GenTokenStreamInterceptor(authToken)), grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(1024 * 1024 * 40)))
+      conn, err := grpc.DialContext(ctx, connectionStr, grpc.WithInsecure(), grpc.WithBlock(), grpc.WithUnaryInterceptor(GenTokenUnaryInterceptor(authToken)), grpc.WithStreamInterceptor(GenTokenStreamInterceptor(authToken)), grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(1024 * 1024 * 100)))
       if err != nil {
         log.Fatalf("did not connect")
       }
@@ -108,7 +108,7 @@ func CreateLedgerContext(connectionStr string, authToken string, applicationId s
     },
     GetConnectionWithoutTimeout: func() (ConnectionWrapper) {
       ctx := context.Background()
-      conn, err := grpc.DialContext(ctx, connectionStr, grpc.WithInsecure(), grpc.WithBlock(), grpc.WithUnaryInterceptor(GenTokenUnaryInterceptor(authToken)), grpc.WithStreamInterceptor(GenTokenStreamInterceptor(authToken)), grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(1024 * 1024 * 40)))
+      conn, err := grpc.DialContext(ctx, connectionStr, grpc.WithInsecure(), grpc.WithBlock(), grpc.WithUnaryInterceptor(GenTokenUnaryInterceptor(authToken)), grpc.WithStreamInterceptor(GenTokenStreamInterceptor(authToken)), grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(1024 * 1024 * 100)))
       if err != nil {
         log.Fatalf("did not connect")
       }
@@ -432,8 +432,7 @@ func OffsetToLedgerOffset(taggedOffset TaggedOffset) (*v1.LedgerOffset) {
 }
 
 
-// TODO(cidkidnix): errorState should just be an enum
-func (ledgerContext *LedgerContext) GetTransactionTrees(taggedOffset TaggedOffset, cb func(transactionTree *v1.TransactionTree, errorState uint64)()) {
+func (ledgerContext *LedgerContext) GetTransactionTrees(taggedOffset TaggedOffset, cb func(transactionTree *v1.TransactionTree, errorState error)()) {
   offset := OffsetToLedgerOffset(taggedOffset)
   ledgerId := ledgerContext.GetLedgerId()
 
@@ -467,11 +466,11 @@ func (ledgerContext *LedgerContext) GetTransactionTrees(taggedOffset TaggedOffse
   for {
     resp, err := response.Recv()
     if err != nil {
-      cb(nil, 1)
+      cb(nil, err)
     }
 
     for _, tx := range(resp.Transactions) {
-      cb(tx, 0)
+      cb(tx, nil)
     }
   }
 }

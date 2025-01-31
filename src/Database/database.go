@@ -19,6 +19,7 @@ type ExercisedTable struct {
   ChildEventIds pq.StringArray `gorm:"type:text[]"`
   Witnesses pq.StringArray `gorm:"type:text[]"`
   ExerciseResult []byte `gorm:"type:jsonb"`
+  OffsetIx uint64
 }
 
 func (ExercisedTable) TableName() string {
@@ -35,6 +36,9 @@ type CreatesTable struct {
    Observers pq.StringArray `gorm:"type:text[]"`
    Signatories pq.StringArray `gorm:"type:text[]"`
    ArchiveEvent *string `gorm:"index:archive_event_idx,column:archive_event"`
+   CreatedAt uint64
+   ArchivedAt *uint64
+   LifeIx uint64 `gorm:"->;type: int8range GENERATED ALWAYS AS (int8range(created_at, archived_at)) STORED;"`
 }
 
 func (CreatesTable) TableName() string {
@@ -46,6 +50,7 @@ type TransactionTable struct {
   WorkflowId string
   CommandId string `gorm:"index_transactions_idx_command_id"`
   Offset string `gorm:"index:transactions_idx_offset,unique"` // offsets are unique
+  OffsetIx uint64 `gorm:"index:transactions_idx_offset_ix,unique"`
   EventIds pq.StringArray `gorm:"type:text[]"`
 }
 
@@ -59,6 +64,7 @@ func (TransactionTable) TableName() string {
 type Watermark struct {
   PK int `gorm:"primarykey;column:pk;index:watermark_pk,unique"`
   Offset string `gorm:"column:offset"`
+  OffsetIx uint64 `gorm:"column:offset_ix"`
   InitialOffset string `gorm:"column:initial_offset"`
   InstanceID string `gorm:"column:instance_id"`
 }
@@ -77,7 +83,7 @@ func SetupDatabaseProc(db *gorm.DB) {
     AS $$
     BEGIN
       UPDATE __creates
-        SET archive_event = NEW.event_id
+        SET archive_event = NEW.event_id, archived_at = NEW.offset_ix
         WHERE contract_id = NEW.contract_id;
       RETURN NULL;
     END;
@@ -99,8 +105,9 @@ func SetupDatabaseProc(db *gorm.DB) {
     AS $$
     BEGIN
       UPDATE __watermark
-        SET "offset" = NEW.offset
-        WHERE pk = 1;
+        SET "offset" = NEW.offset, "offset_ix" = NEW.offset_ix
+        WHERE pk = 1
+        AND NEW."offset_ix" > "offset_ix";
       RETURN NULL;
     END;
     $$;
@@ -112,12 +119,36 @@ func SetupDatabaseProc(db *gorm.DB) {
     FOR EACH ROW EXECUTE PROCEDURE __update_watermark()
   `)
 
+
+  db.Exec(`
+    CREATE OR REPLACE FUNCTION latest_offset()
+      RETURNS text
+      BEGIN ATOMIC
+        select "offset" from __watermark LIMIT 1;
+      END;
+  `)
+
+  db.Exec(`
+    CREATE OR REPLACE FUNCTION __nearest_ix(off text default latest_offset())
+
+      RETURNS BIGINT
+      LANGUAGE plpgsql
+      AS $$
+        DECLARE
+          value bigint;
+        BEGIN
+          select offset_ix INTO value from __transactions where "offset" = off
+          ORDER BY "offset" DESC LIMIT 1;
+          RETURN value;
+        END;
+      $$
+  `)
   // Table view to show active contracts
   db.Exec(`
     CREATE OR REPLACE VIEW active AS
       SELECT __creates.contract_id, __creates.contract_key, __creates.payload, __creates.template_fqn, __creates.witnesses, __creates.observers, __creates.signatories
       FROM __creates
-      WHERE archive_event IS NULL;
+      WHERE __creates.life_ix @> __nearest_ix();
   `)
 
   // Table view to show all contracts we've seen
@@ -126,15 +157,49 @@ func SetupDatabaseProc(db *gorm.DB) {
       SELECT __creates.contract_id, __creates.contract_key, __creates.payload, __creates.template_fqn, __creates.witnesses, __creates.observers, __creates.signatories
       FROM __creates
   `)
+
+  db.Exec(`
+    CREATE INDEX IF NOT EXISTS
+        __creates_life_ix ON __creates USING gist(life_ix)
+  `)
+
+  db.Exec(`
+    CREATE INDEX IF NOT EXISTS
+       __creates_created_at_ix ON __creates USING btree(created_at)
+  `)
+
+  db.Exec(`
+    CREATE INDEX IF NOT EXISTS
+       __creates_archived_at_ix ON __creates USING btree(archived_at)
+  `)
+
+  db.Exec(`
+    CREATE OR REPLACE FUNCTION active(template_id text default null, i_offset text default latest_offset())
+      RETURNS SETOF __creates
+      LANGUAGE plpgsql AS
+      $$
+        BEGIN
+            RETURN QUERY
+                SELECT * FROM __creates as c
+            WHERE CASE
+                WHEN template_id IS NOT NULL THEN c.template_fqn = template_id
+                ELSE true
+              END
+            AND c.life_ix @> __nearest_ix(i_offset);
+        END;
+     $$
+  `)
+
+
 }
 
 type DatabaseConnection struct {
-  Host string
-  User string
-  Password string
-  DBName string
-  Port int
-  SSLMode string
+  Host string `toml:"host"`
+  User string `toml:"user"`
+  Password string `toml:"password"`
+  DBName string `toml:"dbname"`
+  Port int `toml:"port"`
+  SSLMode string `toml:"sslmode"`
 }
 
 func SetupDatabase(conn DatabaseConnection) (db *gorm.DB) {
@@ -148,7 +213,9 @@ func SetupDatabase(conn DatabaseConnection) (db *gorm.DB) {
     conn.SSLMode,
   )
 
-  db, _ = gorm.Open(postgres.Open(connStr), &gorm.Config{})
+  db, _ = gorm.Open(postgres.Open(connStr), &gorm.Config{
+    PrepareStmt: true,
+  })
   db.AutoMigrate(&TransactionTable{})
   db.AutoMigrate(&CreatesTable{})
   db.AutoMigrate(&ExercisedTable{})
