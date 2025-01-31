@@ -244,13 +244,16 @@ func ParseAndModifySlice(db *gorm.DB, atomMap *AtomicMap[string, Transaction], t
     Offset: transactionTree.Offset,
     OffsetIx: ixOffset,
     EventIds: eventIds,
+    EffectiveAt: transactionTree.EffectiveAt.AsTime(),
   }
+
+  //time.Sleep(time.Second * 1)
 
   atomMap.Modify(func(atomMap map[string]Transaction)(map[string]Transaction) {
     insert := Transaction {
       txTable: txTable,
-      creates: creates.GetSlice(),
-      exercises: exercises.GetSlice(),
+      creates: createsS,
+      exercises: exercisesS,
     }
     atomMap[txTable.TransactionId] = insert
     return atomMap
@@ -291,16 +294,33 @@ func WriteInsert(db *gorm.DB, atomSet *AtomicMap[string, Transaction]) {
 }
 
 func ParseLedgerData(value *v1.Value) (any) {
+  return ParseLedgerDataInternal(value, 0)
+}
+
+func ParseLedgerDataInternal(value *v1.Value, count int) (any) {
   switch x := value.GetSum().(type) {
     case (*v1.Value_Record):
       record := x.Record
       nMap := make(map[string]any)
+      var wg sync.WaitGroup // Wow
+      t := AtomicMap[string, any]{
+        mutex: &sync.RWMutex{},
+        atomMap: make(map[string]any),
+      }
       if record != nil {
         fields := record.GetFields()
         if fields != nil {
           for _, v := range(fields) {
-            nMap[v.Label] = ParseLedgerData(v.Value)
+            wg.Add(1)
+            go func()(){
+              data := ParseLedgerDataInternal(v.Value, count + 1)
+              t.Modify(func(atomMap map[string]any)(map[string]any) {
+                atomMap[v.Label] = data
+                return atomMap
+              })
+            }()
           }
+          nMap = t.GetMap()
         }
       }
       return nMap
@@ -313,7 +333,7 @@ func ParseLedgerData(value *v1.Value) (any) {
       if x.List.Elements != nil {
         var lMap [](any)
         for _, v := range(x.List.Elements) {
-          lMap = append(lMap, ParseLedgerData(v))
+          lMap = append(lMap, ParseLedgerDataInternal(v, count + 1))
         }
         return lMap
       } else {
@@ -326,7 +346,7 @@ func ParseLedgerData(value *v1.Value) (any) {
     case (*v1.Value_Optional):
       emptyMap := make(map[string]any)
       if x.Optional.GetValue() != nil {
-        emptyMap["Some"] = ParseLedgerData(x.Optional.Value)
+        emptyMap["Some"] = ParseLedgerDataInternal(x.Optional.Value, count + 1)
         return emptyMap
       } else {
         emptyMap["None"] = nil
@@ -347,21 +367,21 @@ func ParseLedgerData(value *v1.Value) (any) {
     case (*v1.Value_Map):
       newMap := make(map[string]any)
       for _, v := range(x.Map.Entries) {
-        newMap[v.Key] = ParseLedgerData(v.Value)
+        newMap[v.Key] = ParseLedgerDataInternal(v.Value, count + 1)
       }
       return newMap
     case (*v1.Value_GenMap):
       mapList := [][]any{}
       for _, v := range(x.GenMap.Entries) {
         var inner []any
-        inner = append(inner, ParseLedgerData(v.Key))
-        inner = append(inner, ParseLedgerData(v.Value))
+        inner = append(inner, ParseLedgerDataInternal(v.Key, count + 1))
+        inner = append(inner, ParseLedgerDataInternal(v.Value, count + 1))
         mapList = append(mapList, inner)
       }
       return mapList
     case (*v1.Value_Variant):
       newMap := make(map[string]any)
-      newMap[x.Variant.Constructor] = ParseLedgerData(x.Variant.Value)
+      newMap[x.Variant.Constructor] = ParseLedgerDataInternal(x.Variant.Value, count + 1)
       return newMap
     case (*v1.Value_Enum):
       return x.Enum.Constructor

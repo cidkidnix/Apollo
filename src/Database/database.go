@@ -5,6 +5,7 @@ import (
   "gorm.io/driver/postgres"
   "fmt"
   pq "github.com/lib/pq"
+  "time"
 )
 
 
@@ -52,6 +53,7 @@ type TransactionTable struct {
   Offset string `gorm:"index:transactions_idx_offset,unique"` // offsets are unique
   OffsetIx uint64 `gorm:"index:transactions_idx_offset_ix,unique"`
   EventIds pq.StringArray `gorm:"type:text[]"`
+  EffectiveAt time.Time `gorm:"type:timestamp with time zone"`
 }
 
 func (TransactionTable) TableName() string {
@@ -130,7 +132,6 @@ func SetupDatabaseProc(db *gorm.DB) {
 
   db.Exec(`
     CREATE OR REPLACE FUNCTION __nearest_ix(off text default latest_offset())
-
       RETURNS BIGINT
       LANGUAGE plpgsql
       AS $$
@@ -174,9 +175,25 @@ func SetupDatabaseProc(db *gorm.DB) {
   `)
 
   db.Exec(`
+    CREATE OR REPLACE FUNCTION history(start_offset bigint, end_offset bigint)
+      RETURNS TABLE(contract_id text, offset_ix bigint, template_fqn text, choice text, payload jsonb)
+      LANGUAGE plpgsql STABLE AS
+      $$
+        BEGIN
+             RETURN QUERY SELECT
+                foo.contract_id, foo.offset_ix, foo.template_fqn, foo.choice, foo.choice_argument
+             FROM ((select __creates.contract_id, 'Create' as choice, __creates.payload as choice_argument, __creates.created_at as offset_ix, __creates.template_fqn from __creates WHERE int8range(start_offset, end_offset) @> __creates.created_at)
+             UNION (select __exercised.contract_id, __exercised.choice, __exercised.choice_argument, __exercised.offset_ix, __exercised.template_fqn from __exercised WHERE int8range(start_offset, end_offset) @> __exercised.offset_ix))
+             as foo ORDER BY offset_ix;
+        END;
+      $$
+
+  `)
+
+  db.Exec(`
     CREATE OR REPLACE FUNCTION active(template_id text default null, i_offset text default latest_offset())
       RETURNS SETOF __creates
-      LANGUAGE plpgsql AS
+      LANGUAGE plpgsql STABLE AS
       $$
         BEGIN
             RETURN QUERY
