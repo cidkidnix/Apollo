@@ -169,6 +169,7 @@ func WatchTransactionTrees(config Config.ApolloConfig) {
             Uint64("next_gc", memStats.NextGC).
             Time("last_gc", time.UnixMicro(int64(memStats.LastGC / 1000))).
             Int64("pause_total_ms", time.Duration(memStats.PauseTotalNs).Milliseconds()).
+            Int("num_goroutine", runtime.NumGoroutine()).
             Str("component", "runtime_mem_stats").
             Send()
       log.Info().
