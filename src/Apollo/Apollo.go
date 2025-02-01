@@ -16,6 +16,9 @@ import (
   "runtime"
   "github.com/rs/zerolog/log"
   "github.com/rs/zerolog"
+  "net/http"
+  "strings"
+  "io"
 )
 
 
@@ -88,6 +91,22 @@ func (atomSlice *AtomicSlice[K]) GetSlice() []K {
 
 
 func WatchTransactionTrees(config Config.ApolloConfig) {
+  type internalAuthentication struct {
+    ClientId string
+    AccessToken string
+  }
+
+  auth := &internalAuthentication{}
+
+  if config.Oauth != nil {
+    access_token := GetLedgerAuthentication(*config.Oauth)
+    auth.ClientId = config.Oauth.ClientId
+    auth.AccessToken = access_token
+  } else {
+    auth.ClientId = config.User.ApplicationId
+    auth.AccessToken = config.User.AuthToken
+  }
+
   zerolog.SetGlobalLevel(Config.ParseLogLevel(config.LogLevel))
   zerolog.TimeFieldFormat = time.RFC3339Nano
   log.Info().
@@ -101,7 +120,15 @@ func WatchTransactionTrees(config Config.ApolloConfig) {
         Str("component", "application_settings").
         Send()
   db := Database.SetupDatabase(config.DatabaseSettings)
-  ledgerContext := Ledger.CreateLedgerContext(fmt.Sprintf("%s:%d", config.LedgerConnection.Host, config.LedgerConnection.Port), config.User.AuthToken, config.User.ApplicationId, config.Sandbox)
+
+  ledgerContext := Ledger.CreateLedgerContext(fmt.Sprintf("%s:%d", config.LedgerConnection.Host, config.LedgerConnection.Port), auth.AccessToken, auth.ClientId, config.Sandbox)
+
+  parties := ledgerContext.GetParties()
+
+  log.Info().
+        Strs("read_parties", parties).
+        Str("component", "parties").
+        Send()
 
   db.FirstOrCreate(&Database.Watermark{
     Offset: "000000000000000000",
@@ -193,6 +220,73 @@ func WatchTransactionTrees(config Config.ApolloConfig) {
     }
   }()
   ledgerContext.GetTransactionTrees(GetLedgerOffset(db, config.LedgerOffset), f)
+}
+
+
+
+func GetLedgerAuthentication(oauthConfig Config.Oauth) string {
+    transport := &http.Transport{
+      MaxIdleConns: 10,
+      DisableCompression: true,
+    }
+    client := &http.Client{
+      Transport: transport,
+    }
+
+    var extraParams []string
+    for k, v := range(oauthConfig.ExtraParams) {
+      extraParams = append(extraParams, fmt.Sprintf("%s=%s", k, v))
+    }
+    body := []string{
+      fmt.Sprintf("client_id=%s", oauthConfig.ClientId),
+      fmt.Sprintf("client_secret=%s", oauthConfig.ClientSecret),
+      fmt.Sprintf("grant_type=%s", oauthConfig.GrantType),
+      fmt.Sprintf("redirect_url=%s", "http://localhost"),
+    }
+
+    body = append(body, extraParams...)
+
+    req, err := http.NewRequest(
+      "POST",
+      oauthConfig.Url,
+      strings.NewReader(strings.Join(body[:], "&")),
+    )
+    req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+    resp, err := client.Do(req)
+
+    if err != nil {
+      log.Fatal().
+            Err(err).
+            Str("component", "oauth").
+            Msgf("Error fetching oauth for client_id %s", oauthConfig.ClientId)
+    }
+
+    respBody, err := io.ReadAll(resp.Body)
+    if err != nil {
+      log.Fatal().
+            Err(err).
+            Str("component", "oauth").
+            Msgf("Error reading body of http response for client_id %s", oauthConfig.ClientId)
+    }
+
+    respMap := make(map[string]any)
+    json.Unmarshal(respBody, &respMap)
+
+    if tok, ok := respMap["access_token"]; ok {
+      if _, ok := tok.(string); ok {
+        log.Info().
+            Str("component", "oauth").
+            Msg(fmt.Sprintf("Successfully got authentication token for %s", oauthConfig.ClientId))
+        return tok.(string)
+      }
+    } else {
+      log.Fatal().
+          Err(err).
+          Str("component", "oauth").
+          Msgf("access_token field is missing, or it's not a string", "")
+    }
+
+    return ""
 }
 
 func GetLedgerOffset(db *gorm.DB, offset string) Ledger.TaggedOffset {

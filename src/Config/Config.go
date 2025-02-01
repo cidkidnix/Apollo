@@ -13,7 +13,8 @@ import (
 type (
   ApolloConfig struct {
     LedgerOffset string `toml:"offset"`
-    User User `toml:"user"`
+    User *User `toml:"user"`
+    Oauth *Oauth `toml:"oauth"`
     Sandbox bool `toml:"sandbox"`
     LedgerConnection LedgerConnection `toml:"ledger"`
     DatabaseSettings Database.DatabaseConnection `toml:"database"`
@@ -30,6 +31,14 @@ type (
   User struct {
     AuthToken string `toml:"auth_token"`
     ApplicationId string `toml:"application_id"`
+  }
+
+  Oauth struct {
+    Url string `toml:"url"`
+    ClientSecret string `toml:"client_secret"`
+    ClientId string `toml:"client_id"`
+    GrantType string `toml:"grant_type"`
+    ExtraParams map[string]string `toml:"extra_params"`
   }
 
   GC struct {
