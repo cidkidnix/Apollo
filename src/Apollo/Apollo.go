@@ -246,6 +246,14 @@ func GetLedgerAuthentication(oauthConfig Config.Oauth) string {
 
     body = append(body, extraParams...)
 
+    log.Info().
+          Str("method", "POST").
+          Str("url", oauthConfig.Url).
+          Str("client_id", oauthConfig.ClientId).
+          Strs("extra_params", extraParams).
+          Str("component", "oauth").
+          Send()
+
     req, err := http.NewRequest(
       "POST",
       oauthConfig.Url,
