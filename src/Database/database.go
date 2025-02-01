@@ -6,6 +6,9 @@ import (
   "fmt"
   pq "github.com/lib/pq"
   "time"
+  "context"
+  "gorm.io/gorm/logger"
+  "github.com/rs/zerolog/log"
 )
 
 
@@ -232,6 +235,7 @@ func SetupDatabase(conn DatabaseConnection) (db *gorm.DB) {
 
   db, _ = gorm.Open(postgres.Open(connStr), &gorm.Config{
     PrepareStmt: true,
+    Logger: Logger{},
   })
   db.AutoMigrate(&TransactionTable{})
   db.AutoMigrate(&CreatesTable{})
@@ -239,4 +243,46 @@ func SetupDatabase(conn DatabaseConnection) (db *gorm.DB) {
   db.AutoMigrate(&Watermark{})
   SetupDatabaseProc(db)
   return db
+}
+
+type Logger struct {}
+
+func (l Logger) LogMode(logger.LogLevel) logger.Interface { return l }
+func (l Logger) Error(ctx context.Context, msg string, opts ...interface{}) {
+  log.Error().
+      Ctx(ctx).
+      Str("component", "database").
+      Msg(fmt.Sprintf(msg, opts...))
+}
+func (l Logger) Warn(ctx context.Context, msg string, opts ...interface{}) {
+  log.Warn().
+      Ctx(ctx).
+      Str("component", "database").
+      Msg(fmt.Sprintf(msg, opts...))
+}
+func (l Logger) Info(ctx context.Context, msg string, opts ...interface{}) {
+  log.Info().
+      Ctx(ctx).
+      Str("component", "database").
+      Msg(fmt.Sprintf(msg, opts...))
+}
+func (l Logger) Trace(ctx context.Context, begin time.Time, fc func() (sql string, rowsAffected int64), err error) {
+  _, ret2 := fc()
+
+  log.Info().
+        Ctx(ctx).
+        Int64("query_execution_time_ms", time.Since(begin).Milliseconds()).
+        Int64("rows_affected", ret2).
+        Str("component", "database").
+        Send()
+
+  //log.Trace().
+  //      Ctx(ctx).
+  //      Time("begin", begin).
+  //      Str("sql", ret1).
+  //      Int64("rows_affected", ret2).
+  //      Err(err).
+  //      Str("component", "gorm").
+  //      Send()
+
 }

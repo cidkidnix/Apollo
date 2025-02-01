@@ -12,6 +12,10 @@ import (
   "sync"
   //"github.com/schollz/progressbar/v3"
   "strconv"
+  "runtime/debug"
+  "runtime"
+  "github.com/rs/zerolog/log"
+  "github.com/rs/zerolog"
 )
 
 
@@ -84,6 +88,18 @@ func (atomSlice *AtomicSlice[K]) GetSlice() []K {
 
 
 func WatchTransactionTrees(config Config.ApolloConfig) {
+  zerolog.SetGlobalLevel(Config.ParseLogLevel(config.LogLevel))
+  zerolog.TimeFieldFormat = time.RFC3339Nano
+  log.Info().
+        Str("ledger_offset", config.LedgerOffset).
+        Interface("user", config.User).
+        Bool("is_sandbox", config.Sandbox).
+        Interface("ledger_connection", config.LedgerConnection).
+        Interface("database_settings", config.DatabaseSettings).
+        Interface("gc", config.GC).
+        Str("loglevel", config.LogLevel).
+        Str("component", "application_settings").
+        Send()
   db := Database.SetupDatabase(config.DatabaseSettings)
   ledgerContext := Ledger.CreateLedgerContext(fmt.Sprintf("%s:%d", config.LedgerConnection.Host, config.LedgerConnection.Port), config.User.AuthToken, config.User.ApplicationId, config.Sandbox)
 
@@ -101,16 +117,80 @@ func WatchTransactionTrees(config Config.ApolloConfig) {
     mutex: &sync.RWMutex{},
     atomMap: make(map[string]Transaction),
   }
+  gotCounter := 0
+  currentOffset := ""
+  debug.SetMemoryLimit(config.GC.MemoryLimit * 1024 * 1024)
   f := func(transactionTree *v1.TransactionTree, error error) {
     if error != nil { panic(error) }
-    //bar.Add(1)
-    //fmt.Printf("Got Transaction: %s\n", transactionTree.TransactionId)
-    initial := time.Now()
+    currentOffset = transactionTree.Offset
+    if config.GC.ManualGCPause {
+      debug.SetGCPercent(-1)
+      if !config.GC.ManualGCRun {
+
+      } else {
+        defer debug.SetGCPercent(100)
+      }
+    }
+
     ParseAndModifySlice(db, insertSlice, transactionTree)
-    end := time.Since(initial)
-    fmt.Printf("Time to ingest offset %v\n", end)
+    gotCounter += 1
+    if gotCounter > config.GC.ManualGCRunAmount {
+      log.Info().
+            Int("gc_offset_count", gotCounter).
+            Str("component", "manual_gc_run").
+            Send()
+      runtime.GC()
+      gotCounter = 0
+    }
   }
-  go WriteInsert(db, insertSlice)
+  go WriteInsert(config.BatchSize, db, insertSlice)
+  // Prints out stats
+  go func()(){
+    for {
+      memStats := runtime.MemStats{}
+      runtime.ReadMemStats(&memStats)
+      log.Debug().
+            Uint64("alloc", memStats.Alloc).
+            Uint64("total_alloc", memStats.TotalAlloc).
+            Uint64("sys", memStats.Sys).
+            Uint64("lookups", memStats.Lookups).
+            Uint64("frees", memStats.Frees).
+            Uint64("heap_alloc", memStats.HeapAlloc).
+            Uint64("heap_sys", memStats.HeapSys).
+            Uint64("heap_idle", memStats.HeapIdle).
+            Uint64("heap_in_use", memStats.HeapInuse).
+            Uint64("heap_released", memStats.HeapReleased).
+            Uint64("heap_objects", memStats.HeapObjects).
+            Uint64("stack_in_use", memStats.StackInuse).
+            Uint64("stack_sys", memStats.StackSys).
+            Float64("gc_cpu_fraction", memStats.GCCPUFraction).
+            Uint32("num_forced_gc", memStats.NumForcedGC).
+            Uint32("num_gc", memStats.NumGC).
+            Uint64("next_gc", memStats.NextGC).
+            Time("last_gc", time.UnixMicro(int64(memStats.LastGC / 1000))).
+            Int64("pause_total_ms", time.Duration(memStats.PauseTotalNs).Milliseconds()).
+            Str("component", "runtime_mem_stats").
+            Send()
+      log.Info().
+            Str("current_offset", currentOffset).
+            Str("component", "offset_tracker").
+            Send()
+
+      //fmt.Printf("[GC] Last GC: %v\n", gcStats.LastGC)
+      //fmt.Printf("[GC] Collected Garbage %d times\n", gcStats.NumGC)
+      //fmt.Printf("[GC] Total time in pause %v\n", gcStats.PauseTotal)
+      //if len(gcStats.Pause) > 0 {
+      //  fmt.Printf("[GC] Last GC Took %v\n", gcStats.Pause[0])
+      //}
+
+      log.Debug().
+              Int("queue_size", len(insertSlice.GetMap())).
+              Str("component", "transaction_queue").
+              Send()
+
+      time.Sleep(time.Millisecond * 500)
+    }
+  }()
   ledgerContext.GetTransactionTrees(GetLedgerOffset(db, config.LedgerOffset), f)
 }
 
@@ -121,7 +201,7 @@ func GetLedgerOffset(db *gorm.DB, offset string) Ledger.TaggedOffset {
       if err := db.First(&watermark, 1); err.Error != nil {
          return Ledger.TaggedOffset { Ledger.Genesis, nil }
       } else {
-        fmt.Printf("Starting Offset: %s\n", watermark.Offset)
+        log.Info().Str("starting_offset", watermark.Offset).Str("component", "get_offset").Send()
         return Ledger.TaggedOffset { Ledger.AtOffset, &watermark.Offset }
       }
     default:
@@ -131,7 +211,6 @@ func GetLedgerOffset(db *gorm.DB, offset string) Ledger.TaggedOffset {
 
 func ParseAndModifySlice(db *gorm.DB, atomMap *AtomicMap[string, Transaction], transactionTree *v1.TransactionTree) {
   var eventIds []string
-
   var createsS []*Database.CreatesTable
   var exercisesS []*Database.ExercisedTable
   creates := &AtomicSlice[*Database.CreatesTable]{
@@ -157,25 +236,15 @@ func ParseAndModifySlice(db *gorm.DB, atomMap *AtomicMap[string, Transaction], t
       go func()(){
         defer wg.Done()
 
-        contractKeyTime := time.Now()
         contractKey := ParseLedgerData(created.ContractKey)
-        cKend := time.Since(contractKeyTime)
-
-        fmt.Printf("Time to parse contract key: %s\n", cKend)
         contractKeyJSON, _ := json.Marshal(contractKey)
 
-
-
-        createParseTime := time.Now()
         createArguments := ParseLedgerData(&v1.Value {
           Sum: &v1.Value_Record {
             Record: created.CreateArguments,
           },
         })
-        createParseEndTime := time.Since(createParseTime)
         createArgumentsJSON, _ := json.Marshal(createArguments)
-
-        fmt.Printf("Time to parse payload: %s\n", createParseEndTime)
 
         templateID := created.TemplateId
         flatTemplateID := fmt.Sprintf("%s:%s:%s", templateID.PackageId, templateID.ModuleName, templateID.EntityName)
@@ -249,22 +318,31 @@ func ParseAndModifySlice(db *gorm.DB, atomMap *AtomicMap[string, Transaction], t
 
   //time.Sleep(time.Second * 1)
 
+
+
   atomMap.Modify(func(atomMap map[string]Transaction)(map[string]Transaction) {
     insert := Transaction {
       txTable: txTable,
-      creates: createsS,
-      exercises: exercisesS,
+      creates: creates.GetSlice(),
+      exercises: exercises.GetSlice(),
     }
     atomMap[txTable.TransactionId] = insert
     return atomMap
   })
+
+  log.Debug().
+            Int("creates_size", len(creates.GetSlice())).
+            Int("exercises_size", len(exercises.GetSlice())).
+            Str("component", "parsed_data").
+            Send()
 }
 
-func WriteInsert(db *gorm.DB, atomSet *AtomicMap[string, Transaction]) {
+func WriteInsert(batchSize int, db *gorm.DB, atomSet *AtomicMap[string, Transaction]) {
   for {
     // We can't lock the whole map while doing DB operations
     // using this without caution will cause transactions to be missed
     t := atomSet.GetMap()
+
     if len(t) <= 0 { continue }
 
     var creates []*Database.CreatesTable
@@ -277,10 +355,17 @@ func WriteInsert(db *gorm.DB, atomSet *AtomicMap[string, Transaction]) {
       transactions = append(transactions, v.txTable)
     }
 
+    log.Debug().
+            Int("creates_size", len(creates)).
+            Int("exercises_size", len(exercises)).
+            Int("transactions_size", len(transactions)).
+            Str("component", "report_insert_size").
+            Send()
+
     // TODO(Dylan): More threads!
-    if len(creates) > 0 { db.CreateInBatches(creates, 100) }
-    if len(exercises) > 0 { db.CreateInBatches(exercises, 100) }
-    if len(transactions) > 0 { db.CreateInBatches(transactions, 100) }
+    if len(creates) > 0 { db.CreateInBatches(creates, batchSize) }
+    if len(exercises) > 0 { db.CreateInBatches(exercises, batchSize) }
+    if len(transactions) > 0 { db.CreateInBatches(transactions, batchSize) }
 
     // Remove all the transactionIds from this map that we've already written
     atomSet.Modify(func(atomMap map[string]Transaction)(map[string]Transaction) {
@@ -302,7 +387,7 @@ func ParseLedgerDataInternal(value *v1.Value, count int) (any) {
     case (*v1.Value_Record):
       record := x.Record
       nMap := make(map[string]any)
-      var wg sync.WaitGroup // Wow
+      var wg sync.WaitGroup
       t := AtomicMap[string, any]{
         mutex: &sync.RWMutex{},
         atomMap: make(map[string]any),
@@ -318,6 +403,7 @@ func ParseLedgerDataInternal(value *v1.Value, count int) (any) {
                 atomMap[v.Label] = data
                 return atomMap
               })
+              return
             }()
           }
           nMap = t.GetMap()

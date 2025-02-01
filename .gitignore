@@ -1,1 +1,4 @@
 ./Apollo
+*.log
+*.png
+*.txt
