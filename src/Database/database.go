@@ -9,6 +9,7 @@ import (
   "context"
   "gorm.io/gorm/logger"
   "github.com/rs/zerolog/log"
+  "github.com/jackc/pgx/v5/pgxpool"
 )
 
 
@@ -222,7 +223,7 @@ type DatabaseConnection struct {
   SSLMode string `toml:"sslmode"`
 }
 
-func SetupDatabase(conn DatabaseConnection) (db *gorm.DB) {
+func SetupDatabase(conn DatabaseConnection) (db *gorm.DB,  pool *pgxpool.Pool) {
   connStr := fmt.Sprintf(
     "host=%s user=%s password=%s dbname=%s port=%d sslmode=%s",
     conn.Host,
@@ -235,6 +236,7 @@ func SetupDatabase(conn DatabaseConnection) (db *gorm.DB) {
 
   db, _ = gorm.Open(postgres.Open(connStr), &gorm.Config{
     PrepareStmt: true,
+    SkipDefaultTransaction: true,
     Logger: Logger{},
   })
   db.AutoMigrate(&TransactionTable{})
@@ -242,7 +244,25 @@ func SetupDatabase(conn DatabaseConnection) (db *gorm.DB) {
   db.AutoMigrate(&ExercisedTable{})
   db.AutoMigrate(&Watermark{})
   SetupDatabaseProc(db)
-  return db
+
+  db.Exec(`
+     DELETE FROM
+        __exercised WHERE offset_ix
+        NOT BETWEEN (select offset_ix from __transactions ORDER BY offset_ix LIMIT 1)
+        AND (select offset_ix from __transactions ORDER BY offset_ix DESC LIMIT 1)
+  `)
+  db.Exec(`
+     DELETE FROM __creates WHERE created_at
+     NOT BETWEEN (select offset_ix from __transactions ORDER BY offset_ix LIMIT 1)
+     AND (select offset_ix from __transactions ORDER BY offset_ix DESC LIMIT 1)
+  `)
+  config, _ := pgxpool.ParseConfig(connStr)
+  runtimeParams := config.ConnConfig.RuntimeParams
+  runtimeParams["application_name"] = "Apollo"
+  //runtimeParams["keepalives_idle"] = "2"
+  config.ConnConfig.RuntimeParams = runtimeParams
+  t, _ := pgxpool.NewWithConfig(context.TODO(), config)
+  return db, t
 }
 
 type Logger struct {}
@@ -269,7 +289,7 @@ func (l Logger) Info(ctx context.Context, msg string, opts ...interface{}) {
 func (l Logger) Trace(ctx context.Context, begin time.Time, fc func() (sql string, rowsAffected int64), err error) {
   _, ret2 := fc()
 
-  log.Info().
+  log.Debug().
         Ctx(ctx).
         Int64("query_execution_time_ms", time.Since(begin).Milliseconds()).
         Int64("rows_affected", ret2).

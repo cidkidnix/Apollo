@@ -20,6 +20,10 @@ import (
   "strings"
   "io"
   "context"
+  "slices"
+
+  "github.com/jackc/pgx/v5"
+  "github.com/jackc/pgx/v5/pgxpool"
 )
 
 
@@ -92,7 +96,7 @@ func (atomSlice *AtomicSlice[K]) GetSlice() []K {
 
 
 func WatchTransactionTrees(config Config.ApolloConfig) {
-  db := Database.SetupDatabase(config.DatabaseSettings)
+  db, pgxConn := Database.SetupDatabase(config.DatabaseSettings)
 
   zerolog.SetGlobalLevel(Config.ParseLogLevel(config.LogLevel))
   zerolog.TimeFieldFormat = time.RFC3339Nano
@@ -107,12 +111,16 @@ func WatchTransactionTrees(config Config.ApolloConfig) {
         Str("component", "application_settings").
         Send()
 
-  transactionQueueMap := &AtomicMap[string, Transaction]{
+  transactionQueueMap := &AtomicMap[uint64, Transaction]{
     mutex: &sync.RWMutex{},
-    atomMap: make(map[string]Transaction),
+    atomMap: make(map[uint64]Transaction),
   }
 
+  go WriteInsert(config.TxMaxPull, config.BatchSize, pgxConn, transactionQueueMap)
+
   debug.SetMemoryLimit(config.GC.MemoryLimit * 1024 * 1024)
+
+
 
   // Prints out stats
   go func()(){
@@ -154,7 +162,7 @@ func WatchTransactionTrees(config Config.ApolloConfig) {
   RunTransactionListener(config, db, transactionQueueMap, GetLedgerOffset(db, config.LedgerOffset))
 }
 
-func RunTransactionListener(config Config.ApolloConfig, db *gorm.DB, insertSlice *AtomicMap[string, Transaction], ledgerOffset Ledger.TaggedOffset) {
+func RunTransactionListener(config Config.ApolloConfig, db *gorm.DB, insertSlice *AtomicMap[uint64, Transaction], ledgerOffset Ledger.TaggedOffset) {
   type internalAuthentication struct {
     ClientId string
     AccessToken string
@@ -204,15 +212,13 @@ func RunTransactionListener(config Config.ApolloConfig, db *gorm.DB, insertSlice
     if config.GC.ManualGCPause {
       debug.SetGCPercent(-1)
       if !config.GC.ManualGCRun {
-
-      } else {
         defer debug.SetGCPercent(100)
       }
     }
 
     ParseAndModifySlice(db, insertSlice, transactionTree)
     gotCounter += 1
-    if gotCounter > config.GC.ManualGCRunAmount {
+    if gotCounter > config.GC.ManualGCRunAmount && config.GC.ManualGCRun {
       log.Info().
             Int("gc_offset_count", gotCounter).
             Str("component", "manual_gc_run").
@@ -221,12 +227,11 @@ func RunTransactionListener(config Config.ApolloConfig, db *gorm.DB, insertSlice
       gotCounter = 0
     }
 
-    log.Info().
+    log.Debug().
           Str("current_offset", currentOffset).
           Str("component", "offset_tracker").
           Send()
   }
-  go WriteInsert(config.BatchSize, db, insertSlice)
 
   go func()() {
     log.Info().
@@ -334,6 +339,7 @@ func GetLedgerOffset(db *gorm.DB, offset string) Ledger.TaggedOffset {
          return Ledger.TaggedOffset { Ledger.Genesis, nil }
       } else {
         log.Info().Str("starting_offset", watermark.Offset).Str("component", "get_offset").Send()
+
         return Ledger.TaggedOffset { Ledger.AtOffset, &watermark.Offset }
       }
     default:
@@ -341,7 +347,7 @@ func GetLedgerOffset(db *gorm.DB, offset string) Ledger.TaggedOffset {
   }
 }
 
-func ParseAndModifySlice(db *gorm.DB, atomMap *AtomicMap[string, Transaction], transactionTree *v1.TransactionTree) {
+func ParseAndModifySlice(db *gorm.DB, atomMap *AtomicMap[uint64, Transaction], transactionTree *v1.TransactionTree) {
   var eventIds []string
   var createsS []*Database.CreatesTable
   var exercisesS []*Database.ExercisedTable
@@ -391,7 +397,6 @@ func ParseAndModifySlice(db *gorm.DB, atomMap *AtomicMap[string, Transaction], t
           TemplateFqn: flatTemplateID,
           EventID: eventId,
           CreatedAt: ixOffset,
-          ArchiveEvent: nil,
         }
 
         creates.Modify(func(slice []*Database.CreatesTable)([]*Database.CreatesTable){
@@ -452,13 +457,13 @@ func ParseAndModifySlice(db *gorm.DB, atomMap *AtomicMap[string, Transaction], t
 
 
 
-  atomMap.Modify(func(atomMap map[string]Transaction)(map[string]Transaction) {
+  atomMap.Modify(func(atomMap map[uint64]Transaction)(map[uint64]Transaction) {
     insert := Transaction {
       txTable: txTable,
       creates: creates.GetSlice(),
       exercises: exercises.GetSlice(),
     }
-    atomMap[txTable.TransactionId] = insert
+    atomMap[ixOffset] = insert
     return atomMap
   })
 
@@ -469,7 +474,14 @@ func ParseAndModifySlice(db *gorm.DB, atomMap *AtomicMap[string, Transaction], t
             Send()
 }
 
-func WriteInsert(batchSize int, db *gorm.DB, atomSet *AtomicMap[string, Transaction]) {
+func chunkBy[T any](items []T, chunkSize int) (chunks [][]T) {
+    for chunkSize < len(items) {
+        items, chunks = items[chunkSize:], append(chunks, items[0:chunkSize:chunkSize])
+    }
+    return append(chunks, items)
+}
+
+func WriteInsert(txMaxPull int, batchSize int, db *pgxpool.Pool, atomSet *AtomicMap[uint64, Transaction]) {
   for {
     // We can't lock the whole map while doing DB operations
     // using this without caution will cause transactions to be missed
@@ -481,10 +493,27 @@ func WriteInsert(batchSize int, db *gorm.DB, atomSet *AtomicMap[string, Transact
     var exercises []*Database.ExercisedTable
     var transactions []*Database.TransactionTable
 
-    for _, v := range(t) {
-      creates = append(creates, v.creates...)
-      exercises = append(exercises, v.exercises...)
-      transactions = append(transactions, v.txTable)
+    maxTxs := txMaxPull
+    if len(t) < txMaxPull {
+      maxTxs = len(t)
+    }
+
+    var txKeys []uint64
+    for k, _ := range(t) {
+      txKeys = append(txKeys, k)
+    }
+
+    slices.Sort(txKeys)
+
+    for i := 0; i < maxTxs; i++ {
+      log.Debug().
+            Uint64("offset", txKeys[i]).
+            Str("component", "report_insert_offset").
+            Send()
+      creates = append(creates, t[txKeys[i]].creates...)
+      exercises = append(exercises, t[txKeys[i]].exercises...)
+      transactions = append(transactions, t[txKeys[i]].txTable)
+
     }
 
     log.Debug().
@@ -494,82 +523,247 @@ func WriteInsert(batchSize int, db *gorm.DB, atomSet *AtomicMap[string, Transact
             Str("component", "report_insert_size").
             Send()
 
-    // TODO(Dylan): More threads!
-    if len(creates) > 0 { db.CreateInBatches(creates, batchSize) }
-    if len(exercises) > 0 { db.CreateInBatches(exercises, batchSize) }
-    if len(transactions) > 0 { db.CreateInBatches(transactions, batchSize) }
+    logMsg := log.Info()
+
+    fullCopy := time.Now()
+
+
+    if len(creates) > 0 {
+      initial := time.Now()
+      copyCount, err := db.CopyFrom(
+        context.Background(),
+        pgx.Identifier{"__creates"},
+        []string{"event_id", "contract_id", "contract_key", "payload", "template_fqn", "witnesses", "observers", "signatories", "created_at"},
+        pgx.CopyFromSlice(len(creates), func(i int) ([]any, error) {
+            return []any{
+                creates[i].EventID,
+                creates[i].ContractID,
+                creates[i].ContractKey,
+                creates[i].CreateArguments,
+                creates[i].TemplateFqn,
+                creates[i].Witnesses,
+                creates[i].Observers,
+                creates[i].Signatories,
+                creates[i].CreatedAt,
+           }, nil
+        }),
+      )
+
+      if err != nil { panic(err) }
+
+      logMsg.
+        Int64("creates_copy_count", copyCount).
+        Int64("creates_latency_ns", time.Since(initial).Nanoseconds())
+    }
+    if len(exercises) > 0 {
+      var wg sync.WaitGroup
+
+      // Trigger updates are slow, workaround this by
+      // dispatching batches of 100 in parallel
+      chunks := chunkBy(exercises, batchSize)
+      initial := time.Now()
+      for _, exercise := range(chunks) {
+        wg.Add(1)
+        go func()(){
+          defer wg.Done()
+          _, err := db.CopyFrom(
+            context.Background(),
+            pgx.Identifier{"__exercised"},
+            []string{
+                "event_id",
+                "contract_id",
+                "template_fqn",
+                "choice",
+                "choice_argument",
+                "acting_parties",
+                "consuming",
+                "child_event_ids",
+                "witnesses",
+                "exercise_result",
+                "offset_ix",
+            },
+            pgx.CopyFromSlice(len(exercise), func(i int) ([]any, error) {
+                return []any{
+                  exercise[i].EventID,
+                  exercise[i].ContractID,
+                  exercise[i].TemplateFqn,
+                  exercise[i].Choice,
+                  exercise[i].ChoiceArgument,
+                  exercise[i].ActingParties,
+                  exercise[i].Consuming,
+                  exercise[i].ChildEventIds,
+                  exercise[i].Witnesses,
+                  exercise[i].ExerciseResult,
+                  exercise[i].OffsetIx,
+               }, nil
+            }),
+          )
+          if err != nil { panic(err) }
+        }()
+      }
+      wg.Wait()
+      logMsg.
+        Int("exercises_copy_count", len(exercises)).
+        Int64("exercises_latency_ns", time.Since(initial).Nanoseconds())
+    }
+    if len(transactions) > 0 {
+      var wg sync.WaitGroup
+      initial := time.Now()
+
+      // Database will be "unstable" during this event
+      // We pull out the last offset out of the transaction queue to make sure
+      // database state always becomes consistent with ledger state
+      finalTx := []*Database.TransactionTable{transactions[len(transactions) - 1]}
+      logMsg.Uint64("offset", finalTx[0].OffsetIx)
+      if !(len(transactions) - 1 <= 0) {
+        chunks := chunkBy(transactions[:len(transactions) - 1], batchSize)
+        for _, transaction := range(chunks) {
+          wg.Add(1)
+          go func()(){
+            defer wg.Done()
+            _, err := db.CopyFrom(
+              context.Background(),
+              pgx.Identifier{"__transactions"},
+              []string{
+                  "transaction_id",
+                  "workflow_id",
+                  "command_id",
+                  "offset",
+                  "offset_ix",
+                  "event_ids",
+                  "effective_at",
+              },
+              pgx.CopyFromSlice(len(transaction), func(i int) ([]any, error) {
+                  return []any{
+                    transaction[i].TransactionId,
+                    transaction[i].WorkflowId,
+                    transaction[i].CommandId,
+                    transaction[i].Offset,
+                    transaction[i].OffsetIx,
+                    transaction[i].EventIds,
+                    transaction[i].EffectiveAt,
+                 }, nil
+              }),
+            )
+
+            if err != nil { panic(err) }
+          }()
+        }
+      }
+      _, err := db.CopyFrom(
+        context.Background(),
+        pgx.Identifier{"__transactions"},
+        []string{
+            "transaction_id",
+            "workflow_id",
+            "command_id",
+            "offset",
+            "offset_ix",
+            "event_ids",
+            "effective_at",
+        },
+        pgx.CopyFromSlice(len(finalTx), func(i int) ([]any, error) {
+            return []any{
+              finalTx[i].TransactionId,
+              finalTx[i].WorkflowId,
+              finalTx[i].CommandId,
+              finalTx[i].Offset,
+              finalTx[i].OffsetIx,
+              finalTx[i].EventIds,
+              finalTx[i].EffectiveAt,
+           }, nil
+        }),
+      )
+
+      if err != nil { panic(err) }
+      logMsg.
+        Int("transactions_copy_count", len(transactions)).
+        Int64("transactions_latency_ns", time.Since(initial).Nanoseconds())
+    }
+
+    logMsg.
+         Int64("total_time_ms", time.Since(fullCopy).Milliseconds()).
+         Str("component", "database_copy").Send()
 
     // Remove all the transactionIds from this map that we've already written
-    atomSet.Modify(func(atomMap map[string]Transaction)(map[string]Transaction) {
-      for k, _ := range(t) {
-        delete(atomMap, k)
+    atomSet.Modify(func(atomMap map[uint64]Transaction)(map[uint64]Transaction) {
+      for i := 0; i < maxTxs; i++  {
+        delete(atomMap, txKeys[i])
       }
       return atomMap
     })
-    time.Sleep(time.Nanosecond * 200)
   }
 }
 
 func ParseLedgerData(value *v1.Value) (any) {
-  return ParseLedgerDataInternal(value, 0)
+  initial := time.Now()
+  r := ParseLedgerDataInternal(value, 0)
+  end := time.Since(initial)
+  log.Debug().
+        Int64("time_to_parse_value_ns", end.Nanoseconds()).
+        Str("component", "parser").
+        Send()
+  return r
 }
 
 func ParseLedgerDataInternal(value *v1.Value, count int) (any) {
+  initial := time.Now()
+  logMsg := log.Trace().
+        Str("type", fmt.Sprintf("%T", value.GetSum())).
+        Int("recursion_depth", count)
+
+  f := func()(){
+    go func()() {
+      logMsg.
+        Int64("processing_time_ns", time.Since(initial).Nanoseconds()).
+        Str("component", "parser_internal").Send()
+    }()
+  }
+  defer f()
+
+  if value == nil {
+    return map[string]any{}
+  }
+
   switch x := value.GetSum().(type) {
     case (*v1.Value_Record):
       record := x.Record
-      nMap := make(map[string]any)
-      var wg sync.WaitGroup
-      t := AtomicMap[string, any]{
-        mutex: &sync.RWMutex{},
-        atomMap: make(map[string]any),
-      }
       if record != nil {
         fields := record.GetFields()
         if fields != nil {
+          logMsg.Int("num_fields", len(fields))
+          recordMap := make(map[string]any)
           for _, v := range(fields) {
-            wg.Add(1)
-            go func()(){
-              data := ParseLedgerDataInternal(v.Value, count + 1)
-              t.Modify(func(atomMap map[string]any)(map[string]any) {
-                atomMap[v.Label] = data
-                return atomMap
-              })
-              return
-            }()
+            recordMap[v.Label] = ParseLedgerDataInternal(v.Value, count + 1)
           }
-          nMap = t.GetMap()
+          return recordMap
         }
       }
-      return nMap
+      return map[string]any{}
+
     case (*v1.Value_Party):
       return x.Party
     case (*v1.Value_Text):
       return x.Text
     case (*v1.Value_List):
-      emptyList := []string{}
       if x.List.Elements != nil {
-        var lMap [](any)
+        logMsg.Int("num_elements", len(x.List.Elements))
+        var elements []any
         for _, v := range(x.List.Elements) {
-          lMap = append(lMap, ParseLedgerDataInternal(v, count + 1))
+          elements = append(elements, ParseLedgerDataInternal(v, count + 1))
         }
-        return lMap
-      } else {
-        return emptyList
       }
+      return []any{}
     case (*v1.Value_Date):
       epoch := time.Unix(0, 0).UTC()
       timestamp := epoch.AddDate(0, 0, int(x.Date)).UTC().Format(time.RFC3339)
       return fmt.Sprintf("%s", timestamp)
     case (*v1.Value_Optional):
-      emptyMap := make(map[string]any)
       if x.Optional.GetValue() != nil {
-        emptyMap["Some"] = ParseLedgerDataInternal(x.Optional.Value, count + 1)
-        return emptyMap
-      } else {
-        emptyMap["None"] = nil
-        return emptyMap
+        optionalVal := make([]any, 1)
+        optionalVal[0] = ParseLedgerDataInternal(x.Optional.Value, count + 1)
       }
+      return []any{}
 
     case (*v1.Value_Int64):
       return x.Int64
@@ -584,34 +778,32 @@ func ParseLedgerDataInternal(value *v1.Value, count int) (any) {
       return x.ContractId
     case (*v1.Value_Map):
       newMap := make(map[string]any)
+      logMsg.Int("map_entries_length", len(x.Map.Entries))
       for _, v := range(x.Map.Entries) {
         newMap[v.Key] = ParseLedgerDataInternal(v.Value, count + 1)
       }
       return newMap
     case (*v1.Value_GenMap):
-      mapList := [][]any{}
-      for _, v := range(x.GenMap.Entries) {
-        var inner []any
-        inner = append(inner, ParseLedgerDataInternal(v.Key, count + 1))
-        inner = append(inner, ParseLedgerDataInternal(v.Value, count + 1))
-        mapList = append(mapList, inner)
+      logMsg.Int("genmap_entries_length", len(x.GenMap.Entries))
+      genMapList := make([][]any, len(x.GenMap.Entries))
+      for i := 0; i < len(x.GenMap.Entries); i++ {
+        genMapList[i] = []any{
+          ParseLedgerDataInternal(x.GenMap.Entries[i].Key, count + 1),
+          ParseLedgerDataInternal(x.GenMap.Entries[i].Value, count + 1),
+        }
       }
-      return mapList
+      return genMapList
     case (*v1.Value_Variant):
-      newMap := make(map[string]any)
-      newMap[x.Variant.Constructor] = ParseLedgerDataInternal(x.Variant.Value, count + 1)
-      return newMap
+      return map[string]any{
+        x.Variant.Constructor: ParseLedgerDataInternal(x.Variant.Value, count + 1),
+      }
     case (*v1.Value_Enum):
       return x.Enum.Constructor
     case (*v1.Value_Unit):
       emptyMap := make(map[string]any)
       return emptyMap
   }
-  if value == nil {
-    emptyMap := make(map[string]any)
-    return emptyMap
-  }
-  panic(fmt.Sprintf("%s", value))
-  // We should never hit this case, which is why panic is produced above
-  return nil
+
+  panic("should never reach here")
+
 }

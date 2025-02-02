@@ -21,6 +21,7 @@ type (
     GC GC `toml:"gc"`
     LogLevel string `toml:"log_level"`
     BatchSize int `toml:"batch_size"`
+    TxMaxPull int `toml:"tx_max_pull"`
   }
 
   LedgerConnection struct {
@@ -72,6 +73,7 @@ func GetConfig(configPath string) ApolloConfig {
     LogLevel: "Info",
     BatchSize: 300,
     Oauth: nil,
+    TxMaxPull: 2,
     GC: GC{
       ManualGCRun: false,
       ManualGCPause: false,
