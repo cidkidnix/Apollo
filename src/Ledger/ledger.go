@@ -12,6 +12,7 @@ import (
   "fmt"
   "io"
   "github.com/google/uuid"
+  "errors"
 )
 
 type PartyRightsMode int
@@ -432,7 +433,7 @@ func OffsetToLedgerOffset(taggedOffset TaggedOffset) (*v1.LedgerOffset) {
 }
 
 
-func (ledgerContext *LedgerContext) GetTransactionTrees(taggedOffset TaggedOffset, cb func(transactionTree *v1.TransactionTree, errorState error)()) {
+func (ledgerContext *LedgerContext) GetTransactionTrees(ctx context.Context, taggedOffset TaggedOffset, cb func(transactionTree *v1.TransactionTree, errorState error)()) (int, error) {
   offset := OffsetToLedgerOffset(taggedOffset)
   ledgerId := ledgerContext.GetLedgerId()
 
@@ -464,15 +465,22 @@ func (ledgerContext *LedgerContext) GetTransactionTrees(taggedOffset TaggedOffse
   }
 
   for {
-    resp, err := response.Recv()
-    if err != nil {
-      cb(nil, err)
-    }
+    select {
+      case <-ctx.Done():
+        return 0, errors.New("Context Canceled")
+      default:
+        resp, err := response.Recv()
+        if err != nil {
+          return 1, err
+        }
 
-    for _, tx := range(resp.Transactions) {
-      cb(tx, nil)
+        for _, tx := range(resp.Transactions) {
+          cb(tx, nil)
+        }
     }
   }
+
+  return 1, nil
 }
 
 type wrappedStream struct {

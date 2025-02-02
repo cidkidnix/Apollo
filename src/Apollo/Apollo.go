@@ -19,6 +19,7 @@ import (
   "net/http"
   "strings"
   "io"
+  "context"
 )
 
 
@@ -91,21 +92,7 @@ func (atomSlice *AtomicSlice[K]) GetSlice() []K {
 
 
 func WatchTransactionTrees(config Config.ApolloConfig) {
-  type internalAuthentication struct {
-    ClientId string
-    AccessToken string
-  }
-
-  auth := &internalAuthentication{}
-
-  if config.Oauth != nil {
-    access_token := GetLedgerAuthentication(*config.Oauth)
-    auth.ClientId = config.Oauth.ClientId
-    auth.AccessToken = access_token
-  } else {
-    auth.ClientId = config.User.ApplicationId
-    auth.AccessToken = config.User.AuthToken
-  }
+  db := Database.SetupDatabase(config.DatabaseSettings)
 
   zerolog.SetGlobalLevel(Config.ParseLogLevel(config.LogLevel))
   zerolog.TimeFieldFormat = time.RFC3339Nano
@@ -119,58 +106,14 @@ func WatchTransactionTrees(config Config.ApolloConfig) {
         Str("loglevel", config.LogLevel).
         Str("component", "application_settings").
         Send()
-  db := Database.SetupDatabase(config.DatabaseSettings)
 
-  ledgerContext := Ledger.CreateLedgerContext(fmt.Sprintf("%s:%d", config.LedgerConnection.Host, config.LedgerConnection.Port), auth.AccessToken, auth.ClientId, config.Sandbox)
-
-  parties := ledgerContext.GetParties()
-
-  log.Info().
-        Strs("read_parties", parties).
-        Str("component", "parties").
-        Send()
-
-  db.FirstOrCreate(&Database.Watermark{
-    Offset: "000000000000000000",
-    OffsetIx: 0,
-    InitialOffset: config.LedgerOffset,
-    InstanceID: "Apollo",
-    PK: 1,
-  }, &Database.Watermark{ PK: 1 })
-
-  //bar := progressbar.Default(-1)
-
-  insertSlice := &AtomicMap[string, Transaction]{
+  transactionQueueMap := &AtomicMap[string, Transaction]{
     mutex: &sync.RWMutex{},
     atomMap: make(map[string]Transaction),
   }
-  gotCounter := 0
-  currentOffset := ""
+
   debug.SetMemoryLimit(config.GC.MemoryLimit * 1024 * 1024)
-  f := func(transactionTree *v1.TransactionTree, error error) {
-    if error != nil { panic(error) }
-    currentOffset = transactionTree.Offset
-    if config.GC.ManualGCPause {
-      debug.SetGCPercent(-1)
-      if !config.GC.ManualGCRun {
 
-      } else {
-        defer debug.SetGCPercent(100)
-      }
-    }
-
-    ParseAndModifySlice(db, insertSlice, transactionTree)
-    gotCounter += 1
-    if gotCounter > config.GC.ManualGCRunAmount {
-      log.Info().
-            Int("gc_offset_count", gotCounter).
-            Str("component", "manual_gc_run").
-            Send()
-      runtime.GC()
-      gotCounter = 0
-    }
-  }
-  go WriteInsert(config.BatchSize, db, insertSlice)
   // Prints out stats
   go func()(){
     for {
@@ -199,32 +142,113 @@ func WatchTransactionTrees(config Config.ApolloConfig) {
             Int("num_goroutine", runtime.NumGoroutine()).
             Str("component", "runtime_mem_stats").
             Send()
-      log.Info().
-            Str("current_offset", currentOffset).
-            Str("component", "offset_tracker").
-            Send()
-
-      //fmt.Printf("[GC] Last GC: %v\n", gcStats.LastGC)
-      //fmt.Printf("[GC] Collected Garbage %d times\n", gcStats.NumGC)
-      //fmt.Printf("[GC] Total time in pause %v\n", gcStats.PauseTotal)
-      //if len(gcStats.Pause) > 0 {
-      //  fmt.Printf("[GC] Last GC Took %v\n", gcStats.Pause[0])
-      //}
 
       log.Debug().
-              Int("queue_size", len(insertSlice.GetMap())).
+              Int("queue_size", len(transactionQueueMap.GetMap())).
               Str("component", "transaction_queue").
               Send()
 
       time.Sleep(time.Millisecond * 500)
     }
   }()
-  ledgerContext.GetTransactionTrees(GetLedgerOffset(db, config.LedgerOffset), f)
+  RunTransactionListener(config, db, transactionQueueMap, GetLedgerOffset(db, config.LedgerOffset))
 }
 
+func RunTransactionListener(config Config.ApolloConfig, db *gorm.DB, insertSlice *AtomicMap[string, Transaction], ledgerOffset Ledger.TaggedOffset) {
+  type internalAuthentication struct {
+    ClientId string
+    AccessToken string
+    ExpireTime int
+  }
+
+  auth := &internalAuthentication{}
+
+  if config.Oauth != nil {
+    access_token, expire_time := GetLedgerAuthentication(*config.Oauth)
+    auth.ClientId = config.Oauth.ClientId
+    auth.AccessToken = access_token
+    auth.ExpireTime = expire_time
+  } else {
+    auth.ClientId = config.User.ApplicationId
+    auth.AccessToken = config.User.AuthToken
+    auth.ExpireTime = 10
+  }
+
+  db.FirstOrCreate(&Database.Watermark{
+    Offset: "000000000000000000",
+    OffsetIx: 0,
+    InitialOffset: config.LedgerOffset,
+    InstanceID: "Apollo",
+    PK: 1,
+  }, &Database.Watermark{ PK: 1 })
 
 
-func GetLedgerAuthentication(oauthConfig Config.Oauth) string {
+  ledgerContext := Ledger.CreateLedgerContext(fmt.Sprintf("%s:%d", config.LedgerConnection.Host, config.LedgerConnection.Port), auth.AccessToken, auth.ClientId, config.Sandbox)
+
+  parties := ledgerContext.GetParties()
+
+  log.Info().
+        Strs("read_parties", parties).
+        Str("component", "parties").
+        Send()
+
+  ctx, cancel := context.WithCancel(context.Background())
+
+
+  gotCounter := 0
+  currentOffset := ""
+
+  f := func(transactionTree *v1.TransactionTree, error error) {
+    if error != nil { panic(error) }
+    currentOffset = transactionTree.Offset
+    if config.GC.ManualGCPause {
+      debug.SetGCPercent(-1)
+      if !config.GC.ManualGCRun {
+
+      } else {
+        defer debug.SetGCPercent(100)
+      }
+    }
+
+    ParseAndModifySlice(db, insertSlice, transactionTree)
+    gotCounter += 1
+    if gotCounter > config.GC.ManualGCRunAmount {
+      log.Info().
+            Int("gc_offset_count", gotCounter).
+            Str("component", "manual_gc_run").
+            Send()
+      runtime.GC()
+      gotCounter = 0
+    }
+
+    log.Info().
+          Str("current_offset", currentOffset).
+          Str("component", "offset_tracker").
+          Send()
+  }
+  go WriteInsert(config.BatchSize, db, insertSlice)
+
+  go func()() {
+    log.Info().
+          Int("auth_time_seconds", auth.ExpireTime).
+          Str("component", "transaction_streamer_oauth").
+          Send()
+
+    time.Sleep(time.Second * time.Duration(auth.ExpireTime))
+    cancel()
+  }()
+
+  _, returnErr := ledgerContext.GetTransactionTrees(ctx, ledgerOffset, f)
+
+  log.Info().
+        Str("component", "transaction_streamer").
+        Err(returnErr).
+        Msg("GetTransactionTrees Returned an Error, Retrying")
+  RunTransactionListener(config, db, insertSlice, Ledger.TaggedOffset{ Ledger.AtOffset, &currentOffset })
+
+}
+
+func GetLedgerAuthentication(oauthConfig Config.Oauth) (string, int) {
     transport := &http.Transport{
       MaxIdleConns: 10,
       DisableCompression: true,
@@ -280,21 +304,26 @@ func GetLedgerAuthentication(oauthConfig Config.Oauth) string {
     respMap := make(map[string]any)
     json.Unmarshal(respBody, &respMap)
 
-    if tok, ok := respMap["access_token"]; ok {
-      if _, ok := tok.(string); ok {
+    if tok, ok := respMap["access_token"].(string); ok {
+      if tok1, ok1 := respMap["expires_in"].(float64); ok1 {
         log.Info().
             Str("component", "oauth").
             Msg(fmt.Sprintf("Successfully got authentication token for %s", oauthConfig.ClientId))
-        return tok.(string)
+        return tok, int(tok1)
+      } else {
+        log.Fatal().
+              Err(err).
+              Str("component", "oauth").
+              Msgf("expires_in field is missing, or it's not a float or integer")
       }
     } else {
       log.Fatal().
           Err(err).
           Str("component", "oauth").
-          Msgf("access_token field is missing, or it's not a string", "")
+          Msgf("access_token field is missing, or it's not a string")
     }
 
-    return ""
+    return "", 0
 }
 
 func GetLedgerOffset(db *gorm.DB, offset string) Ledger.TaggedOffset {

@@ -71,6 +71,7 @@ func GetConfig(configPath string) ApolloConfig {
   config := ApolloConfig{
     LogLevel: "Info",
     BatchSize: 300,
+    Oauth: nil,
     GC: GC{
       ManualGCRun: false,
       ManualGCPause: false,
