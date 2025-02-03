@@ -250,15 +250,22 @@ func SetupDatabase(conn DatabaseConnection) (db *gorm.DB,  pool *pgxpool.Pool) {
   db.Exec(`
      DELETE FROM
         __exercised WHERE offset_ix
-        NOT BETWEEN (select offset_ix from __transactions ORDER BY offset_ix LIMIT 1)
+        NOT BETWEEN (select offset_ix from __transactions ORDER BY offset_ix ASC LIMIT 1)
         AND (select offset_ix from __transactions ORDER BY offset_ix DESC LIMIT 1)
   `)
   db.Exec(`
      DELETE FROM __creates WHERE created_at
-     NOT BETWEEN (select offset_ix from __transactions ORDER BY offset_ix LIMIT 1)
+     NOT BETWEEN (select offset_ix from __transactions ORDER BY offset_ix ASC LIMIT 1)
      AND (select offset_ix from __transactions ORDER BY offset_ix DESC LIMIT 1)
   `)
-  config, _ := pgxpool.ParseConfig(connStr)
+
+  config, err := pgxpool.ParseConfig(connStr)
+  if err != nil {
+    log.Fatal().
+        Err(err).
+        Str("component", "database_connection").
+        Msgf("Failed to connect to the database!")
+  }
   runtimeParams := config.ConnConfig.RuntimeParams
   runtimeParams["application_name"] = "Apollo"
   //runtimeParams["keepalives_idle"] = "2"
@@ -273,10 +280,10 @@ type Logger struct {}
 
 func (l Logger) LogMode(logger.LogLevel) logger.Interface { return l }
 func (l Logger) Error(ctx context.Context, msg string, opts ...interface{}) {
-  log.Error().
+  log.Fatal().
       Ctx(ctx).
       Str("component", "database").
-      Msg(fmt.Sprintf(msg, opts...))
+      Msgf(fmt.Sprintf(msg, opts...))
 }
 func (l Logger) Warn(ctx context.Context, msg string, opts ...interface{}) {
   log.Warn().

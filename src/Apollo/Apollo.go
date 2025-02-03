@@ -193,7 +193,7 @@ func RunTransactionListener(config Config.ApolloConfig, db *gorm.DB, insertSlice
   } else {
     auth.ClientId = config.User.ApplicationId
     auth.AccessToken = config.User.AuthToken
-    auth.ExpireTime = 10
+    auth.ExpireTime = config.User.Timeout
   }
 
   db.FirstOrCreate(&Database.Watermark{
@@ -220,6 +220,8 @@ func RunTransactionListener(config Config.ApolloConfig, db *gorm.DB, insertSlice
   gotCounter := 0
   currentOffset := ""
 
+  templateFilters := ParseTemplateFilters(config.Filter.Template)
+
   f := func(transactionTree *v1.TransactionTree, error error) {
     if error != nil { panic(error) }
     currentOffset = transactionTree.Offset
@@ -230,7 +232,7 @@ func RunTransactionListener(config Config.ApolloConfig, db *gorm.DB, insertSlice
       }
     }
 
-    ParseAndModifySlice(db, insertSlice, transactionTree)
+    ParseAndModifySlice(templateFilters, db, insertSlice, transactionTree)
     gotCounter += 1
     if gotCounter > config.GC.ManualGCRunAmount && config.GC.ManualGCRun {
       log.Info().
@@ -284,11 +286,23 @@ func GetLedgerAuthentication(oauthConfig Config.Oauth) (string, int) {
       fmt.Sprintf("client_id=%s", oauthConfig.ClientId),
       fmt.Sprintf("client_secret=%s", oauthConfig.ClientSecret),
       fmt.Sprintf("grant_type=%s", oauthConfig.GrantType),
-      fmt.Sprintf("redirect_url=%s", "http://localhost"),
     }
 
     body = append(body, extraParams...)
 
+    req, err := http.NewRequest(
+      "POST",
+      oauthConfig.Url,
+      strings.NewReader(strings.Join(body[:], "&")),
+    )
+
+    if err != nil {
+        log.Fatal().
+              Err(err).
+              Str("component", "oauth").
+              Msgf("Fatal error", "")
+    }
+    req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
     log.Info().
           Str("method", "POST").
           Str("url", oauthConfig.Url).
@@ -296,13 +310,6 @@ func GetLedgerAuthentication(oauthConfig Config.Oauth) (string, int) {
           Strs("extra_params", extraParams).
           Str("component", "oauth").
           Send()
-
-    req, err := http.NewRequest(
-      "POST",
-      oauthConfig.Url,
-      strings.NewReader(strings.Join(body[:], "&")),
-    )
-    req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
     resp, err := client.Do(req)
 
     if err != nil {
@@ -361,7 +368,45 @@ func GetLedgerOffset(db *gorm.DB, offset string) Ledger.TaggedOffset {
   }
 }
 
-func ParseAndModifySlice(db *gorm.DB, atomMap *AtomicMap[uint64, Transaction], transactionTree *v1.TransactionTree) {
+type InternalFilter struct {
+  IgnoreModules map[string]interface{}
+  IgnorePackages map[string]interface{}
+  IgnoreEntity map[string]interface{}
+}
+
+func ParseTemplateFilters(templateFilter Config.TemplateFilter) InternalFilter {
+  modules := make(map[string]interface{})
+  packages := make(map[string]interface{})
+  entity := make(map[string]interface{})
+  for _, i := range(templateFilter.IgnoreModules) {
+    modules[i] = nil
+  }
+
+  for _, i := range(templateFilter.IgnorePackages) {
+    packages[i] = nil
+  }
+
+  for _, i := range(templateFilter.IgnoreEntities) {
+    packages[i] = nil
+  }
+
+  return InternalFilter{modules, packages, entity}
+}
+
+func IsFiltered(filter InternalFilter, template *v1.Identifier) bool {
+  if _, ok := filter.IgnoreModules[template.ModuleName]; ok {
+    return true
+  }
+  if _, ok := filter.IgnorePackages[template.PackageId]; ok {
+    return true
+  }
+  if _, ok := filter.IgnoreEntity[template.EntityName]; ok {
+    return true
+  }
+  return false
+}
+
+func ParseAndModifySlice(templateFilter InternalFilter, db *gorm.DB, atomMap *AtomicMap[uint64, Transaction], transactionTree *v1.TransactionTree) {
   var eventIds []string
   var createsS []*Database.CreatesTable
   var exercisesS []*Database.ExercisedTable
@@ -382,8 +427,15 @@ func ParseAndModifySlice(db *gorm.DB, atomMap *AtomicMap[uint64, Transaction], t
   if err != nil { panic("Failed to parse offset") }
 
   for eventId, data := range(transactionTree.EventsById) {
-    eventIds = append(eventIds, eventId)
     if created := data.GetCreated(); created != nil {
+      if IsFiltered(templateFilter, created.TemplateId) {
+          log.Debug().
+            Str("event_id", created.EventId).
+            Str("event_type", "create").
+            Str("component", "filter").
+            Msg("Filtered event based on template filters")
+          continue
+      }
       wg.Add(1)
       go func()(){
         defer wg.Done()
@@ -421,6 +473,14 @@ func ParseAndModifySlice(db *gorm.DB, atomMap *AtomicMap[uint64, Transaction], t
     }
 
     if exercised := data.GetExercised(); exercised != nil {
+      if IsFiltered(templateFilter, exercised.TemplateId) {
+          log.Debug().
+            Str("event_id", exercised.EventId).
+            Str("event_type", "exercise").
+            Str("component", "filter").
+            Msg("Filtered event based on template filters")
+          continue
+      }
       wg.Add(1)
       go func()(){
         defer wg.Done()
@@ -453,6 +513,7 @@ func ParseAndModifySlice(db *gorm.DB, atomMap *AtomicMap[uint64, Transaction], t
         })
       }()
     }
+    eventIds = append(eventIds, eventId)
   }
 
   wg.Wait()

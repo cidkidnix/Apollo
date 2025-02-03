@@ -21,6 +21,7 @@ type (
     GC GC `toml:"gc"`
     LogLevel string `toml:"log_level"`
     BatchSize BatchSizes `toml:"batch_size"`
+    Filter Filter `toml:"filters"`
     TxMaxPull int `toml:"tx_max_pull"`
   }
 
@@ -32,6 +33,17 @@ type (
   User struct {
     AuthToken string `toml:"auth_token"`
     ApplicationId string `toml:"application_id"`
+    Timeout int `toml:"timeout"`
+  }
+
+  Filter struct {
+      Template TemplateFilter `toml:"template_filter"`
+  }
+
+  TemplateFilter struct {
+    IgnoreModules []string `toml:"ignore_modules"`
+    IgnorePackages []string `toml:"ignore_package"`
+    IgnoreEntities []string `toml:"ignore_entity"`
   }
 
   Oauth struct {
