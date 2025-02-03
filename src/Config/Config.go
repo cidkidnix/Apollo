@@ -20,7 +20,7 @@ type (
     DatabaseSettings Database.DatabaseConnection `toml:"database"`
     GC GC `toml:"gc"`
     LogLevel string `toml:"log_level"`
-    BatchSize int `toml:"batch_size"`
+    BatchSize BatchSizes `toml:"batch_size"`
     TxMaxPull int `toml:"tx_max_pull"`
   }
 
@@ -40,6 +40,12 @@ type (
     ClientId string `toml:"client_id"`
     GrantType string `toml:"grant_type"`
     ExtraParams map[string]string `toml:"extra_params"`
+  }
+
+  BatchSizes struct {
+    Creates int `toml"create"`
+    Exercises int `toml"exercise"`
+    Transactions int `toml"transaction"`
   }
 
   GC struct {
@@ -71,9 +77,17 @@ func GetConfig(configPath string) ApolloConfig {
 
   config := ApolloConfig{
     LogLevel: "Info",
-    BatchSize: 300,
+    BatchSize: BatchSizes {
+      Creates: -1,
+      Exercises: 200,
+      Transactions: 200,
+    },
     Oauth: nil,
     TxMaxPull: 2,
+    DatabaseSettings: Database.DatabaseConnection{
+      MinConnections: 4,
+      MaxConnections: 16,
+    },
     GC: GC{
       ManualGCRun: false,
       ManualGCPause: false,

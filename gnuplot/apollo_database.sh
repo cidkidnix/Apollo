@@ -1,1 +1,1 @@
-tail -f -n +1 $1 | jq 'select(.component == "database")' --unbuffered -c | jq --unbuffered -r -c '"\(.query_execution_time_ms), \(.time)"' >> batches.log
+tail -f -n +1 $1 | jq 'select(.component == "database_copy")' --unbuffered -c | jq --unbuffered -r -c '"\(.total_time_ms), \(.creates_latency_ms), \(.exercises_latency_ms), \(.transactions_latency_ms), \(.time)"' >> batches.log

@@ -21,8 +21,11 @@ set xdata time
 set timefmt '%Y-%m-%dT%H:%M:%S'
 set format x '%H:%M:%.2S'
 set samples 1000
-plot filename.".log" using 2:1 w l lw 1 title "Batch Size", \
-     filename.".log" using 2:(avg_n($1)) w l lc rgb "red" lw 3 title "Average Batch Size"
+plot filename.".log" using 5:1 w l lw 1 title "Total Latency", \
+     filename.".log" using 5:2 w l lw 1 lc rgb "green" title "Creates Write Latency", \
+     filename.".log" using 5:3 w l lw 1 lc rgb "blue" title "Exercise Write Latency", \
+     filename.".log" using 5:4 w l lw 1 lc rgb "black" title "Transaction Write Latency", \
+     filename.".log" using 5:(avg_n($1)) w l lc rgb "red" lw 3 title "Average Latency"
 
 while (1) {
   pause 1

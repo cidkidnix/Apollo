@@ -221,6 +221,8 @@ type DatabaseConnection struct {
   DBName string `toml:"dbname"`
   Port int `toml:"port"`
   SSLMode string `toml:"sslmode"`
+  MaxConnections int32 `toml:"max_connections"`
+  MinConnections int32 `toml:"min_connections"`
 }
 
 func SetupDatabase(conn DatabaseConnection) (db *gorm.DB,  pool *pgxpool.Pool) {
@@ -261,6 +263,8 @@ func SetupDatabase(conn DatabaseConnection) (db *gorm.DB,  pool *pgxpool.Pool) {
   runtimeParams["application_name"] = "Apollo"
   //runtimeParams["keepalives_idle"] = "2"
   config.ConnConfig.RuntimeParams = runtimeParams
+  config.MaxConns = conn.MaxConnections
+  config.MinConns = conn.MinConnections
   t, _ := pgxpool.NewWithConfig(context.TODO(), config)
   return db, t
 }

@@ -116,6 +116,11 @@ func WatchTransactionTrees(config Config.ApolloConfig) {
     atomMap: make(map[uint64]Transaction),
   }
 
+  //go func()(){
+  //  pgxConn.Ping(context.Background())
+  //  time.Sleep(time.Second * 10)
+  //}()
+
   go WriteInsert(config.TxMaxPull, config.BatchSize, pgxConn, transactionQueueMap)
 
   debug.SetMemoryLimit(config.GC.MemoryLimit * 1024 * 1024)
@@ -155,6 +160,15 @@ func WatchTransactionTrees(config Config.ApolloConfig) {
               Int("queue_size", len(transactionQueueMap.GetMap())).
               Str("component", "transaction_queue").
               Send()
+
+
+      poolStats := pgxConn.Stat()
+      log.Info().
+            Int32("acquired_connections", poolStats.AcquiredConns()).
+            Int32("idle_connections", poolStats.IdleConns()).
+            Str("component", "database_pool").
+            Send()
+
 
       time.Sleep(time.Millisecond * 500)
     }
@@ -475,13 +489,16 @@ func ParseAndModifySlice(db *gorm.DB, atomMap *AtomicMap[uint64, Transaction], t
 }
 
 func chunkBy[T any](items []T, chunkSize int) (chunks [][]T) {
+    if chunkSize < 0 {
+      return append(chunks, items)
+    }
     for chunkSize < len(items) {
         items, chunks = items[chunkSize:], append(chunks, items[0:chunkSize:chunkSize])
     }
     return append(chunks, items)
 }
 
-func WriteInsert(txMaxPull int, batchSize int, db *pgxpool.Pool, atomSet *AtomicMap[uint64, Transaction]) {
+func WriteInsert(txMaxPull int, batchSize Config.BatchSizes, db *pgxpool.Pool, atomSet *AtomicMap[uint64, Transaction]) {
   for {
     // We can't lock the whole map while doing DB operations
     // using this without caution will cause transactions to be missed
@@ -530,38 +547,43 @@ func WriteInsert(txMaxPull int, batchSize int, db *pgxpool.Pool, atomSet *Atomic
 
     if len(creates) > 0 {
       initial := time.Now()
-      copyCount, err := db.CopyFrom(
-        context.Background(),
-        pgx.Identifier{"__creates"},
-        []string{"event_id", "contract_id", "contract_key", "payload", "template_fqn", "witnesses", "observers", "signatories", "created_at"},
-        pgx.CopyFromSlice(len(creates), func(i int) ([]any, error) {
-            return []any{
-                creates[i].EventID,
-                creates[i].ContractID,
-                creates[i].ContractKey,
-                creates[i].CreateArguments,
-                creates[i].TemplateFqn,
-                creates[i].Witnesses,
-                creates[i].Observers,
-                creates[i].Signatories,
-                creates[i].CreatedAt,
-           }, nil
-        }),
-      )
+      batches := chunkBy(creates, batchSize.Creates)
+      logMsg.Int("creates_batches", len(batches))
+      for _, create := range(batches) {
+        _, err := db.CopyFrom(
+          context.Background(),
+          pgx.Identifier{"__creates"},
+          []string{"event_id", "contract_id", "contract_key", "payload", "template_fqn", "witnesses", "observers", "signatories", "created_at"},
+          pgx.CopyFromSlice(len(create), func(i int) ([]any, error) {
+              return []any{
+                  create[i].EventID,
+                  create[i].ContractID,
+                  create[i].ContractKey,
+                  create[i].CreateArguments,
+                  create[i].TemplateFqn,
+                  create[i].Witnesses,
+                  create[i].Observers,
+                  create[i].Signatories,
+                  create[i].CreatedAt,
+             }, nil
+          }),
+        )
 
-      if err != nil { panic(err) }
+        if err != nil { panic(err) }
+      }
 
       logMsg.
-        Int64("creates_copy_count", copyCount).
-        Int64("creates_latency_ns", time.Since(initial).Nanoseconds())
+        Int("creates_copy_count", len(creates)).
+        Int64("creates_latency_ms", time.Since(initial).Milliseconds())
     }
     if len(exercises) > 0 {
       var wg sync.WaitGroup
 
       // Trigger updates are slow, workaround this by
       // dispatching batches of 100 in parallel
-      chunks := chunkBy(exercises, batchSize)
+      chunks := chunkBy(exercises, batchSize.Exercises)
       initial := time.Now()
+      logMsg.Int("exercises_batches", len(chunks))
       for _, exercise := range(chunks) {
         wg.Add(1)
         go func()(){
@@ -604,7 +626,7 @@ func WriteInsert(txMaxPull int, batchSize int, db *pgxpool.Pool, atomSet *Atomic
       wg.Wait()
       logMsg.
         Int("exercises_copy_count", len(exercises)).
-        Int64("exercises_latency_ns", time.Since(initial).Nanoseconds())
+        Int64("exercises_latency_ms", time.Since(initial).Milliseconds())
     }
     if len(transactions) > 0 {
       var wg sync.WaitGroup
@@ -616,7 +638,8 @@ func WriteInsert(txMaxPull int, batchSize int, db *pgxpool.Pool, atomSet *Atomic
       finalTx := []*Database.TransactionTable{transactions[len(transactions) - 1]}
       logMsg.Uint64("offset", finalTx[0].OffsetIx)
       if !(len(transactions) - 1 <= 0) {
-        chunks := chunkBy(transactions[:len(transactions) - 1], batchSize)
+        chunks := chunkBy(transactions[:len(transactions) - 1], batchSize.Transactions)
+        logMsg.Int("transaction_batches", len(chunks))
         for _, transaction := range(chunks) {
           wg.Add(1)
           go func()(){
@@ -678,7 +701,7 @@ func WriteInsert(txMaxPull int, batchSize int, db *pgxpool.Pool, atomSet *Atomic
       if err != nil { panic(err) }
       logMsg.
         Int("transactions_copy_count", len(transactions)).
-        Int64("transactions_latency_ns", time.Since(initial).Nanoseconds())
+        Int64("transactions_latency_ms", time.Since(initial).Milliseconds())
     }
 
     logMsg.
