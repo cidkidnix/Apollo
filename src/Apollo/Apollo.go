@@ -363,8 +363,10 @@ func GetLedgerOffset(db *gorm.DB, offset string) Ledger.TaggedOffset {
 
         return Ledger.TaggedOffset { Ledger.AtOffset, &watermark.Offset }
       }
-    default:
+    case "GENESIS":
       return Ledger.TaggedOffset { Ledger.Genesis, nil }
+    default:
+      return Ledger.TaggedOffset { Ledger.AtOffset, &offset }
   }
 }
 
