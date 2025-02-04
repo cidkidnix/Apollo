@@ -922,7 +922,8 @@ func ParseLedgerDataInternal(lastType *v1.Value, value *v1.Value, count int) (an
       return genMapList
     case (*v1.Value_Variant):
       return map[string]any{
-        x.Variant.Constructor: ParseLedgerDataInternal(value, x.Variant.Value, count + 1),
+          "tag": x.Variant.Constructor,
+          "value": ParseLedgerDataInternal(value, x.Variant.Value, count + 1),
       }
     case (*v1.Value_Enum):
       return x.Enum.Constructor
