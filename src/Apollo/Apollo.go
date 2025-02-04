@@ -24,6 +24,8 @@ import (
 
   "github.com/jackc/pgx/v5"
   "github.com/jackc/pgx/v5/pgxpool"
+  "crypto/tls"
+  "crypto/x509"
 )
 
 
@@ -270,12 +272,22 @@ func RunTransactionListener(config Config.ApolloConfig, db *gorm.DB, insertSlice
 }
 
 func GetLedgerAuthentication(oauthConfig Config.Oauth) (string, int) {
+    systemPool, err := x509.SystemCertPool()
+    if err != nil {
+      log.Fatal().
+          Err(err).
+          Str("component", "oauth").
+          Msgf("Failed to get system cert pool", "")
+    }
     transport := &http.Transport{
       MaxIdleConns: 10,
-      DisableCompression: true,
+      TLSClientConfig: &tls.Config {
+        RootCAs: systemPool,
+      },
     }
     client := &http.Client{
       Transport: transport,
+      Timeout: time.Second * 10,
     }
 
     var extraParams []string
