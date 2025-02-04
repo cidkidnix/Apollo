@@ -887,7 +887,6 @@ func ParseLedgerDataInternal(lastType *v1.Value, value *v1.Value, count int) (an
         return optionalVal
       }
       if canBeNil { return nil } else { return make([]any, 1) }
-      return []any{}
 
     case (*v1.Value_Int64):
       return x.Int64
