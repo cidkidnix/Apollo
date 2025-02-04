@@ -864,10 +864,11 @@ func ParseLedgerDataInternal(lastType *v1.Value, value *v1.Value, count int) (an
     case (*v1.Value_List):
       if x.List.Elements != nil {
         logMsg.Int("num_elements", len(x.List.Elements))
-        var elements []any
-        for _, v := range(x.List.Elements) {
-          elements = append(elements, ParseLedgerDataInternal(value, v, count + 1))
+        elements := make([]any, len(x.List.Elements))
+        for i := 0; i < len(x.List.Elements); i++ {
+          elements[i] = ParseLedgerDataInternal(value, x.List.Elements[i], count + 1)
         }
+        return elements
       }
       return []any{}
     case (*v1.Value_Date):
@@ -882,6 +883,9 @@ func ParseLedgerDataInternal(lastType *v1.Value, value *v1.Value, count int) (an
         }
       }
       if x.Optional.GetValue() != nil {
+        if _, ok := x.Optional.GetValue().GetSum().(*v1.Value_Optional); !ok {
+            return ParseLedgerDataInternal(value, x.Optional.Value, count + 1)
+        }
         optionalVal := make([]any, 1)
         optionalVal[0] = ParseLedgerDataInternal(value, x.Optional.Value, count + 1)
         return optionalVal
