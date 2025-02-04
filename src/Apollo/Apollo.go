@@ -251,22 +251,40 @@ func RunTransactionListener(config Config.ApolloConfig, db *gorm.DB, insertSlice
           Send()
   }
 
+  var wg sync.WaitGroup
+  wg.Add(1)
   go func()() {
+    defer wg.Done()
+    currentTime := 0
     log.Info().
           Int("auth_time_seconds", auth.ExpireTime).
           Str("component", "transaction_streamer_oauth").
           Send()
 
-    time.Sleep(time.Second * time.Duration(auth.ExpireTime))
-    cancel()
+    for {
+      select {
+        case <-ctx.Done():
+          return
+        default:
+          time.Sleep(time.Second)
+          if currentTime >= auth.ExpireTime {
+            cancel()
+            return
+          } else { currentTime += 1 }
+      }
+    }
   }()
 
   _, returnErr := ledgerContext.GetTransactionTrees(ctx, ledgerOffset, f)
+
+  cancel()
+  wg.Wait()
 
   log.Info().
         Str("component", "transaction_streamer").
         Err(returnErr).
         Msg("GetTransactionTrees Returned an Error, Retrying")
+
   RunTransactionListener(config, db, insertSlice, Ledger.TaggedOffset{ Ledger.AtOffset, &currentOffset })
 
 }
@@ -795,7 +813,7 @@ func WriteInsert(txMaxPull int, batchSize Config.BatchSizes, db *pgxpool.Pool, a
 
 func ParseLedgerData(value *v1.Value) (any) {
   initial := time.Now()
-  r := ParseLedgerDataInternal(value, 0)
+  r := ParseLedgerDataInternal(nil, value, 0)
   end := time.Since(initial)
   log.Debug().
         Int64("time_to_parse_value_ns", end.Nanoseconds()).
@@ -804,7 +822,7 @@ func ParseLedgerData(value *v1.Value) (any) {
   return r
 }
 
-func ParseLedgerDataInternal(value *v1.Value, count int) (any) {
+func ParseLedgerDataInternal(lastType *v1.Value, value *v1.Value, count int) (any) {
   initial := time.Now()
   logMsg := log.Trace().
         Str("type", fmt.Sprintf("%T", value.GetSum())).
@@ -832,7 +850,7 @@ func ParseLedgerDataInternal(value *v1.Value, count int) (any) {
           logMsg.Int("num_fields", len(fields))
           recordMap := make(map[string]any)
           for _, v := range(fields) {
-            recordMap[v.Label] = ParseLedgerDataInternal(v.Value, count + 1)
+            recordMap[v.Label] = ParseLedgerDataInternal(value, v.Value, count + 1)
           }
           return recordMap
         }
@@ -848,7 +866,7 @@ func ParseLedgerDataInternal(value *v1.Value, count int) (any) {
         logMsg.Int("num_elements", len(x.List.Elements))
         var elements []any
         for _, v := range(x.List.Elements) {
-          elements = append(elements, ParseLedgerDataInternal(v, count + 1))
+          elements = append(elements, ParseLedgerDataInternal(value, v, count + 1))
         }
       }
       return []any{}
@@ -857,10 +875,18 @@ func ParseLedgerDataInternal(value *v1.Value, count int) (any) {
       timestamp := epoch.AddDate(0, 0, int(x.Date)).UTC().Format(time.RFC3339)
       return fmt.Sprintf("%s", timestamp)
     case (*v1.Value_Optional):
+      canBeNil := false
+      if lastType != nil {
+        if _, ok := lastType.GetSum().(*v1.Value_Optional); !ok {
+          canBeNil = true
+        }
+      }
       if x.Optional.GetValue() != nil {
         optionalVal := make([]any, 1)
-        optionalVal[0] = ParseLedgerDataInternal(x.Optional.Value, count + 1)
+        optionalVal[0] = ParseLedgerDataInternal(value, x.Optional.Value, count + 1)
+        return optionalVal
       }
+      if canBeNil { return nil } else { return make([]any, 1) }
       return []any{}
 
     case (*v1.Value_Int64):
@@ -878,7 +904,7 @@ func ParseLedgerDataInternal(value *v1.Value, count int) (any) {
       newMap := make(map[string]any)
       logMsg.Int("map_entries_length", len(x.Map.Entries))
       for _, v := range(x.Map.Entries) {
-        newMap[v.Key] = ParseLedgerDataInternal(v.Value, count + 1)
+        newMap[v.Key] = ParseLedgerDataInternal(value, v.Value, count + 1)
       }
       return newMap
     case (*v1.Value_GenMap):
@@ -886,14 +912,14 @@ func ParseLedgerDataInternal(value *v1.Value, count int) (any) {
       genMapList := make([][]any, len(x.GenMap.Entries))
       for i := 0; i < len(x.GenMap.Entries); i++ {
         genMapList[i] = []any{
-          ParseLedgerDataInternal(x.GenMap.Entries[i].Key, count + 1),
-          ParseLedgerDataInternal(x.GenMap.Entries[i].Value, count + 1),
+          ParseLedgerDataInternal(value, x.GenMap.Entries[i].Key, count + 1),
+          ParseLedgerDataInternal(value, x.GenMap.Entries[i].Value, count + 1),
         }
       }
       return genMapList
     case (*v1.Value_Variant):
       return map[string]any{
-        x.Variant.Constructor: ParseLedgerDataInternal(x.Variant.Value, count + 1),
+        x.Variant.Constructor: ParseLedgerDataInternal(value, x.Variant.Value, count + 1),
       }
     case (*v1.Value_Enum):
       return x.Enum.Constructor

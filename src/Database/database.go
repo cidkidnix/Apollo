@@ -148,6 +148,27 @@ func SetupDatabaseProc(db *gorm.DB) {
         END;
       $$
   `)
+
+  db.Exec(`
+    CREATE OR REPLACE FUNCTION nearest_offset(n timestamptz)
+      RETURNS text
+      LANGUAGE plpgsql
+      AS $$
+        DECLARE
+          t text;
+        BEGIN
+          SELECT __transactions."offset" INTO t FROM __transactions
+          WHERE effective_at <= n
+          ORDER BY effective_at DESC LIMIT 1;
+
+          IF COUNT(t) = 0 THEN
+            RETURN NULL;
+          ELSE
+            RETURN t;
+          END IF;
+        END;
+      $$
+  `)
   // Table view to show active contracts
   db.Exec(`
     CREATE OR REPLACE VIEW active AS
@@ -159,7 +180,7 @@ func SetupDatabaseProc(db *gorm.DB) {
   // Table view to show all contracts we've seen
   db.Exec(`
     CREATE OR REPLACE VIEW __contracts AS
-      SELECT __creates.contract_id, __creates.contract_key, __creates.payload, __creates.template_fqn, __creates.witnesses, __creates.observers, __creates.signatories
+      SELECT __creates.*
       FROM __creates
   `)
 
@@ -210,8 +231,6 @@ func SetupDatabaseProc(db *gorm.DB) {
         END;
      $$
   `)
-
-
 }
 
 type DatabaseConnection struct {
