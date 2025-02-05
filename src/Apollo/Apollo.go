@@ -766,6 +766,9 @@ func WriteInsert(txMaxPull int, batchSize Config.BatchSizes, db *pgxpool.Pool, a
           }()
         }
       }
+
+      wg.Wait()
+
       _, err := db.CopyFrom(
         context.Background(),
         pgx.Identifier{"__transactions"},
