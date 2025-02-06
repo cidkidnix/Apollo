@@ -158,7 +158,7 @@ func SetupDatabaseProc(db *gorm.DB) {
           t text;
         BEGIN
           SELECT __transactions."offset" INTO t FROM __transactions
-          WHERE effective_at <= n
+          WHERE effective_at >= n
           ORDER BY effective_at DESC LIMIT 1;
 
           IF COUNT(t) = 0 THEN
