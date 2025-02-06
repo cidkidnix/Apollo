@@ -642,28 +642,36 @@ func WriteInsert(txMaxPull int, batchSize Config.BatchSizes, db *pgxpool.Pool, a
       initial := time.Now()
       batches := chunkBy(creates, batchSize.Creates)
       logMsg.Int("creates_batches", len(batches))
+      var wg sync.WaitGroup
       for _, create := range(batches) {
-        _, err := db.CopyFrom(
-          context.Background(),
-          pgx.Identifier{"__creates"},
-          []string{"event_id", "contract_id", "contract_key", "payload", "template_fqn", "witnesses", "observers", "signatories", "created_at"},
-          pgx.CopyFromSlice(len(create), func(i int) ([]any, error) {
-              return []any{
-                  create[i].EventID,
-                  create[i].ContractID,
-                  create[i].ContractKey,
-                  create[i].CreateArguments,
-                  create[i].TemplateFqn,
-                  create[i].Witnesses,
-                  create[i].Observers,
-                  create[i].Signatories,
-                  create[i].CreatedAt,
-             }, nil
-          }),
-        )
+        wg.Add(1)
+        go func()(){
+          defer wg.Done()
+          _, err := db.CopyFrom(
+            context.Background(),
+            pgx.Identifier{"__creates"},
+            []string{"event_id", "contract_id", "contract_key", "payload", "template_fqn", "witnesses", "observers", "signatories", "created_at"},
+            pgx.CopyFromSlice(len(create), func(i int) ([]any, error) {
+                return []any{
+                    create[i].EventID,
+                    create[i].ContractID,
+                    create[i].ContractKey,
+                    create[i].CreateArguments,
+                    create[i].TemplateFqn,
+                    create[i].Witnesses,
+                    create[i].Observers,
+                    create[i].Signatories,
+                    create[i].CreatedAt,
+               }, nil
+            }),
+          )
 
-        if err != nil { panic(err) }
+          if err != nil { panic(err) }
+        }()
+
       }
+
+      wg.Wait()
 
       logMsg.
         Int("creates_copy_count", len(creates)).
