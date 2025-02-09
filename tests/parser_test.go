@@ -71,13 +71,7 @@ func OptionalSome(val *v1.Value) *v1.Value {
 func TestOptionalNonNested(t *testing.T) {
   expectedJSON := "null"
 
-  parsedData :=Apollo.ParseLedgerDataInternal(nil, &v1.Value{
-      Sum: &v1.Value_Optional{
-        Optional: &v1.Optional {
-          Value: nil,
-        },
-      },
-  }, 0)
+  parsedData :=Apollo.ParseLedgerDataInternal(nil, optionalNone, 0)
 
   val, _ := json.Marshal(parsedData)
 
@@ -91,17 +85,7 @@ func TestOptionalNonNested(t *testing.T) {
 func TestOptionalNested(t *testing.T) {
   expectedJSON := "[]"
 
-  parsedData := Apollo.ParseLedgerDataInternal(nil, &v1.Value {
-    Sum: &v1.Value_Optional{
-      Optional: &v1.Optional {
-          Value: &v1.Value {
-            Sum: &v1.Value_Optional {
-                Optional: nil,
-            },
-        },
-      },
-    },
-  }, 0)
+  parsedData := Apollo.ParseLedgerDataInternal(nil, OptionalSome(optionalNone), 0)
 
   val, _ := json.Marshal(parsedData)
 
