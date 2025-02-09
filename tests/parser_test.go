@@ -68,6 +68,31 @@ func OptionalSome(val *v1.Value) *v1.Value {
    }
 }
 
+
+func TestRecord(t *testing.T) {
+  expectedJSON := `{"test_member":"test string","test_member_2":"test string"}`
+  parsedData := Apollo.ParseLedgerDataInternal(nil, testRecord, 0)
+  val, _ := json.Marshal(parsedData)
+
+  if string(val) != expectedJSON {
+    fmt.Println(string(val))
+    t.Fatalf("Serialized value not equal to expected value!")
+  }
+}
+
+func TestText(t *testing.T) {
+  expectedJSON := `"test string"`
+  parsedData := Apollo.ParseLedgerDataInternal(nil, testString, 0)
+  val, _ := json.Marshal(parsedData)
+
+  if string(val) != expectedJSON {
+    fmt.Println(string(val))
+    t.Fatalf("Serialized value not equal to expected value!")
+  }
+}
+
+
+// Optional Tests
 func TestOptionalNonNested(t *testing.T) {
   expectedJSON := "null"
 
