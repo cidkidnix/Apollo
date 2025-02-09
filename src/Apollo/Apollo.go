@@ -888,20 +888,25 @@ func ParseLedgerDataInternal(lastType *v1.Value, value *v1.Value, count int) (an
       return fmt.Sprintf("%s", timestamp)
     case (*v1.Value_Optional):
       canBeNil := false
+      if lastType == nil { canBeNil = true }
       if lastType != nil {
         if _, ok := lastType.GetSum().(*v1.Value_Optional); !ok {
           canBeNil = true
         }
       }
       if x.Optional.GetValue() != nil {
-        if _, ok := x.Optional.GetValue().GetSum().(*v1.Value_Optional); !ok {
+        nextType, ok := x.Optional.GetValue().GetSum().(*v1.Value_Optional)
+        if ok && nextType.Optional.GetValue() == nil {
+            return make([]any, 0)
+        }
+        if !ok {
             return ParseLedgerDataInternal(value, x.Optional.Value, count + 1)
         }
         optionalVal := make([]any, 1)
         optionalVal[0] = ParseLedgerDataInternal(value, x.Optional.Value, count + 1)
         return optionalVal
       }
-      if canBeNil { return nil } else { return make([]any, 1) }
+      if canBeNil { return nil } else { return make([]any, 0) }
 
     case (*v1.Value_Int64):
       return x.Int64
