@@ -59,7 +59,7 @@ func TestMain(m *testing.M) {
 
 
 func OptionalSome(val *v1.Value) *v1.Value {
-  if value == nil { panic("Value cannot be nil!") }
+  if val == nil { panic("Value cannot be nil!") }
   return &v1.Value {
      Sum: &v1.Value_Optional {
        Optional: &v1.Optional {
