@@ -59,6 +59,7 @@ func TestMain(m *testing.M) {
 
 
 func OptionalSome(val *v1.Value) *v1.Value {
+  if value == nil { panic("Value cannot be nil!") }
   return &v1.Value {
      Sum: &v1.Value_Optional {
        Optional: &v1.Optional {
@@ -83,6 +84,17 @@ func TestRecord(t *testing.T) {
 func TestText(t *testing.T) {
   expectedJSON := `"test string"`
   parsedData := Apollo.ParseLedgerDataInternal(nil, testString, 0)
+  val, _ := json.Marshal(parsedData)
+
+  if string(val) != expectedJSON {
+    fmt.Println(string(val))
+    t.Fatalf("Serialized value not equal to expected value!")
+  }
+}
+
+func TestList(t *testing.T) {
+  expectedJSON := `["test string"]`
+  parsedData := Apollo.ParseLedgerDataInternal(nil, testList, 0)
   val, _ := json.Marshal(parsedData)
 
   if string(val) != expectedJSON {
