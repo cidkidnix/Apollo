@@ -6,6 +6,7 @@ import (
   "github.com/digital-asset/dazl-client/v7/go/api/com/daml/ledger/api/v1/admin"
   "google.golang.org/grpc"
   "google.golang.org/grpc/metadata"
+  "google.golang.org/grpc/credentials"
   "context"
   "time"
   "log"
@@ -83,21 +84,25 @@ type LedgerUser struct {
   Token string `json:"token"`
 }
 
-func CreateLedgerContextPerUser(connectionStr string, authTokens map[string]LedgerUser, sandbox bool) (map[string]LedgerContext) {
-  lContextMap := make(map[string]LedgerContext)
-  for k, v := range(authTokens) {
-    ctx := CreateLedgerContext(connectionStr, v.Token, v.ApplicationId, sandbox)
-    lContextMap[k] = ctx
-  }
-  return lContextMap
+type GRPCTLSConfig struct {
+  CertFile string
+  ServerNameOverride string
 }
 
-func CreateLedgerContext(connectionStr string, authToken string, applicationId string, sandbox bool) (LedgerContext) {
+func CreateLedgerContext(connectionStr string, authToken string, applicationId string, sandbox bool, grpcTLS *GRPCTLSConfig) (LedgerContext) {
+  var connectionTLS grpc.DialOption
+  if grpcTLS != nil {
+    creds, err := credentials.NewClientTLSFromFile(grpcTLS.CertFile, grpcTLS.ServerNameOverride)
+    if err != nil { panic(err) }
+    connectionTLS = grpc.WithTransportCredentials(creds)
+  } else {
+    connectionTLS = grpc.WithInsecure()
+  }
   return LedgerContext {
     GetConnection: func() (ConnectionWrapper) {
       ctx := context.Background()
       ctx, cancelCtx := context.WithTimeout(ctx, time.Second * 30)
-      conn, err := grpc.DialContext(ctx, connectionStr, grpc.WithInsecure(), grpc.WithBlock(), grpc.WithUnaryInterceptor(GenTokenUnaryInterceptor(authToken)), grpc.WithStreamInterceptor(GenTokenStreamInterceptor(authToken)), grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(1024 * 1024 * 100)))
+      conn, err := grpc.DialContext(ctx, connectionStr, connectionTLS, grpc.WithBlock(), grpc.WithUnaryInterceptor(GenTokenUnaryInterceptor(authToken)), grpc.WithStreamInterceptor(GenTokenStreamInterceptor(authToken)), grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(1024 * 1024 * 100)))
       if err != nil {
         log.Fatalf("did not connect")
       }
@@ -109,7 +114,7 @@ func CreateLedgerContext(connectionStr string, authToken string, applicationId s
     },
     GetConnectionWithoutTimeout: func() (ConnectionWrapper) {
       ctx := context.Background()
-      conn, err := grpc.DialContext(ctx, connectionStr, grpc.WithInsecure(), grpc.WithBlock(), grpc.WithUnaryInterceptor(GenTokenUnaryInterceptor(authToken)), grpc.WithStreamInterceptor(GenTokenStreamInterceptor(authToken)), grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(1024 * 1024 * 100)))
+      conn, err := grpc.DialContext(ctx, connectionStr, connectionTLS, grpc.WithBlock(), grpc.WithUnaryInterceptor(GenTokenUnaryInterceptor(authToken)), grpc.WithStreamInterceptor(GenTokenStreamInterceptor(authToken)), grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(1024 * 1024 * 100)))
       if err != nil {
         log.Fatalf("did not connect")
       }
@@ -169,7 +174,7 @@ func (ledgerContext *LedgerContext) UploadDAR(dar []byte) {
   client := admin.NewPackageManagementServiceClient(connection.connection)
   _, err := client.UploadDarFile(*connection.ctx, &admin.UploadDarFileRequest {
     DarFile: dar,
-    SubmissionId: fmt.Sprintf("strata-%s", submissionId),
+    SubmissionId: fmt.Sprintf("apollo-%s", submissionId),
   })
 
   if err != nil {
@@ -276,9 +281,9 @@ func (ledgerContext *LedgerContext) SubmitAndWait(commands []*v1.Command) (error
   _, err := client.SubmitAndWait(*connection.ctx, &v1.SubmitAndWaitRequest {
     Commands: &v1.Commands {
       LedgerId: ledgerId,
-      WorkflowId: "strata",
+      WorkflowId: "apollo",
       ApplicationId: ledgerContext.ApplicationId,
-      CommandId: fmt.Sprintf("strata-%s", uuid),
+      CommandId: fmt.Sprintf("apollo-%s", uuid),
       ActAs: parties,
       ReadAs: parties,
       Commands: commands,
@@ -301,9 +306,9 @@ func (ledgerContext *LedgerContext) SubmitAndWaitForEvents(commands []*v1.Comman
   tx, err := client.SubmitAndWaitForTransaction(*connection.ctx, &v1.SubmitAndWaitRequest {
     Commands: &v1.Commands {
       LedgerId: ledgerId,
-      WorkflowId: "strata",
+      WorkflowId: "apollo",
       ApplicationId: ledgerContext.ApplicationId,
-      CommandId: fmt.Sprintf("strata-%s", uuid),
+      CommandId: fmt.Sprintf("apollo-%s", uuid),
       ActAs: parties,
       ReadAs: parties,
       Commands: commands,

@@ -6,7 +6,8 @@ import (
   "os"
   "fmt"
   "github.com/rs/zerolog"
-
+  "reflect"
+  "strings"
 )
 
 
@@ -23,6 +24,7 @@ type (
     BatchSize BatchSizes `toml:"batch_size"`
     Filter Filter `toml:"filters"`
     TxMaxPull int `toml:"tx_max_pull"`
+    TLS *TLS `toml:"tls"`
   }
 
   LedgerConnection struct {
@@ -66,6 +68,11 @@ type (
     ManualGCRunAmount int `toml:"manual_offset_max"`
     MemoryLimit int64 `toml:"memory_limit"`
   }
+
+  TLS struct {
+    CertFile string `toml:"cert_file"`
+    ServerNameOverride string `toml:"server_name_override"`
+  }
 )
 
 func ParseLogLevel(level string) zerolog.Level {
@@ -79,6 +86,54 @@ func ParseLogLevel(level string) zerolog.Level {
     default:
         return zerolog.InfoLevel
   }
+}
+
+var envPrefix string = "$APOLLO_ENV:"
+
+// Recursively look through a type and replace any strings with an associated environment variable
+func ReplaceWithEnv[T any](internal T) T {
+  v := reflect.ValueOf(internal)
+  typeCopy := reflect.New(v.Type()).Elem()
+  typeCopy.Set(v)
+
+  for i := 0; i < v.NumField(); i++ {
+    if v.Field(i).CanInterface() {
+      field := v.Field(i).Interface()
+      replaceVal := v.Field(i)
+      switch reflect.TypeOf(field).Kind() {
+        case reflect.Struct:
+          replaceVal = reflect.ValueOf(ReplaceWithEnv(field))
+        case reflect.String:
+          valueO := field.(string)
+          if strings.HasPrefix(valueO, envPrefix) {
+            environmentName := valueO[len(envPrefix):]
+            if value, ok := os.LookupEnv(environmentName); ok {
+              replaceVal = reflect.ValueOf(value)
+            } else {
+              fmt.Printf("Failed to get environment variable %s\n", environmentName)
+              os.Exit(1)
+            }
+          }
+        case reflect.Ptr:
+          if !v.Field(i).IsNil() {
+            innerVal := v.Field(i).Elem()
+            if innerVal.IsValid() && !innerVal.IsZero() {
+              a := ReplaceWithEnv(innerVal.Interface())
+              newVal := reflect.New(innerVal.Type())
+              newVal.Elem().Set(reflect.ValueOf(a))
+              replaceVal = newVal
+            }
+          }
+        default:
+            continue
+
+      }
+
+      typeCopy.Field(i).Set(replaceVal)
+    }
+  }
+
+  return typeCopy.Interface().(T)
 }
 
 func GetConfig(configPath string) ApolloConfig {
@@ -100,6 +155,7 @@ func GetConfig(configPath string) ApolloConfig {
       MinConnections: 4,
       MaxConnections: 16,
     },
+    TLS: nil,
     GC: GC{
       ManualGCRun: false,
       ManualGCPause: false,
@@ -110,5 +166,6 @@ func GetConfig(configPath string) ApolloConfig {
   _, err := toml.DecodeFile(configPath, &config)
   if err != nil { panic(err) }
 
+  config = ReplaceWithEnv(config)
   return config
 }

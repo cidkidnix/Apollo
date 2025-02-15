@@ -10,6 +10,7 @@ import (
   "encoding/json"
   "time"
   "sync"
+  "os"
   //"github.com/schollz/progressbar/v3"
   "strconv"
   "runtime/debug"
@@ -207,7 +208,24 @@ func RunTransactionListener(config Config.ApolloConfig, db *gorm.DB, insertSlice
   }, &Database.Watermark{ PK: 1 })
 
 
-  ledgerContext := Ledger.CreateLedgerContext(fmt.Sprintf("%s:%d", config.LedgerConnection.Host, config.LedgerConnection.Port), auth.AccessToken, auth.ClientId, config.Sandbox)
+  var tlsConfig *Ledger.GRPCTLSConfig
+  if config.TLS != nil {
+    _, err := os.Stat(config.TLS.CertFile)
+    if err != nil {
+      log.Fatal().
+          Str("component", "tls-loader").
+          Err(err).
+          Msgf("Failed to find %s", config.TLS.CertFile)
+    }
+    log.Info().
+        Str("component", "tls-loader").
+        Msg("Loaded TLS Certificate")
+    tlsConfig = &Ledger.GRPCTLSConfig{config.TLS.CertFile, config.TLS.ServerNameOverride}
+  } else {
+    tlsConfig = nil
+  }
+
+  ledgerContext := Ledger.CreateLedgerContext(fmt.Sprintf("%s:%d", config.LedgerConnection.Host, config.LedgerConnection.Port), auth.AccessToken, auth.ClientId, config.Sandbox, tlsConfig)
 
   parties := ledgerContext.GetParties()
 
