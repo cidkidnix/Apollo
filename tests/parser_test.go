@@ -51,6 +51,47 @@ var testRecord = &v1.Value {
   },
 }
 
+var testGenMap = &v1.Value {
+  Sum: &v1.Value_GenMap{
+    GenMap: &v1.GenMap{
+      Entries: []*v1.GenMap_Entry{
+        { Key: testString, Value: &v1.Value{ Sum: &v1.Value_Unit{} }, },
+      },
+    },
+  },
+}
+
+var testGenMapWithRecord = &v1.Value{
+   Sum: &v1.Value_GenMap{
+    GenMap: &v1.GenMap{
+      Entries: []*v1.GenMap_Entry{
+        { Key: testString, Value: testRecord, },
+      },
+    },
+  },
+}
+
+var testGenMapWithRecordKey = &v1.Value{
+   Sum: &v1.Value_GenMap{
+    GenMap: &v1.GenMap{
+      Entries: []*v1.GenMap_Entry{
+        { Key: testRecord, Value: testString, },
+      },
+    },
+  },
+}
+
+var testMap = &v1.Value{
+  Sum: &v1.Value_Map{
+    Map: &v1.Map{
+      Entries: []*v1.Map_Entry{
+        { Key: "test_me", Value: testString },
+        { Key: "test_me_2", Value: testString },
+      },
+    },
+  },
+}
+
 func TestMain(m *testing.M) {
   zerolog.SetGlobalLevel(zerolog.InfoLevel)
   code := m.Run()
@@ -67,6 +108,46 @@ func OptionalSome(val *v1.Value) *v1.Value {
        },
      },
    }
+}
+
+func TestMap(t *testing.T) {
+  expectedJSON := `{"test_me":"test string","test_me_2":"test string"}`
+  parsedData := Apollo.ParseLedgerDataInternal(nil, testMap, 0)
+  val, _ := json.Marshal(parsedData)
+  if string(val) != expectedJSON {
+    fmt.Println(string(val))
+    t.Fatalf("Serialized value not equal to expected value!")
+  }
+}
+
+func TestGenMap(t *testing.T) {
+  expectedJSON := `[["test string",{}]]`
+  parsedData := Apollo.ParseLedgerDataInternal(nil, testGenMap, 0)
+  val, _ := json.Marshal(parsedData)
+  if string(val) != expectedJSON {
+    fmt.Println(string(val))
+    t.Fatalf("Serialized value not equal to expected value!")
+  }
+}
+
+func TestGenMapWithRecord(t *testing.T) {
+  expectedJSON := `[["test string",{"test_member":"test string","test_member_2":"test string"}]]`
+  parsedData := Apollo.ParseLedgerDataInternal(nil, testGenMapWithRecord, 0)
+  val, _ := json.Marshal(parsedData)
+  if string(val) != expectedJSON {
+    fmt.Println(string(val))
+    t.Fatalf("Serialized value not equal to expected value!")
+  }
+}
+
+func TestGenMapWithRecordKey(t *testing.T) {
+  expectedJSON := `[[{"test_member":"test string","test_member_2":"test string"},"test string"]]`
+  parsedData := Apollo.ParseLedgerDataInternal(nil, testGenMapWithRecordKey, 0)
+  val, _ := json.Marshal(parsedData)
+  if string(val) != expectedJSON {
+    fmt.Println(string(val))
+    t.Fatalf("Serialized value not equal to expected value!")
+  }
 }
 
 
